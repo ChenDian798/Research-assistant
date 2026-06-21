@@ -1,0 +1,28 @@
+{
+  "name": "web_icon_pack",
+  "description": "Merged web-ready SVG icons for search flow, research assistant UI, and document magnifier illustrations.",
+  "version": "1.1.0",
+  "icons": [
+    { "name": "search-flow/analysis", "category": "search-flow", "path": "svg/search-flow/analysis.svg", "source": "search_flow_icon_pack/svg/analysis.svg" },
+    { "name": "search-flow/checklist", "category": "search-flow", "path": "svg/search-flow/checklist.svg", "source": "search_flow_icon_pack/svg/checklist.svg" },
+    { "name": "search-flow/database", "category": "search-flow", "path": "svg/search-flow/database.svg", "source": "search_flow_icon_pack/svg/database.svg" },
+    { "name": "search-flow/filter", "category": "search-flow", "path": "svg/search-flow/filter.svg", "source": "search_flow_icon_pack/svg/filter.svg" },
+    { "name": "search-flow/link", "category": "search-flow", "path": "svg/search-flow/link.svg", "source": "search_flow_icon_pack/svg/link.svg" },
+    { "name": "search-flow/search", "category": "search-flow", "path": "svg/search-flow/search.svg", "source": "search_flow_icon_pack/svg/search.svg" },
+    { "name": "search-flow/start", "category": "search-flow", "path": "svg/search-flow/start.svg", "source": "search_flow_icon_pack/svg/start.svg" },
+    { "name": "search-flow/step-1-search", "category": "search-flow", "path": "svg/search-flow/step-1-search.svg", "source": "search_flow_icon_pack/svg/step-1-search.svg" },
+    { "name": "search-flow/step-2-select", "category": "search-flow", "path": "svg/search-flow/step-2-select.svg", "source": "search_flow_icon_pack/svg/step-2-select.svg" },
+    { "name": "search-flow/step-3-confirm", "category": "search-flow", "path": "svg/search-flow/step-3-confirm.svg", "source": "search_flow_icon_pack/svg/step-3-confirm.svg" },
+    { "name": "search-flow/step-4-analyze", "category": "search-flow", "path": "svg/search-flow/step-4-analyze.svg", "source": "search_flow_icon_pack/svg/step-4-analyze.svg" },
+    { "name": "search-flow/upload", "category": "search-flow", "path": "svg/search-flow/upload.svg", "source": "search_flow_icon_pack/svg/upload.svg" },
+    { "name": "research-assistant/analysis-table", "category": "research-assistant", "path": "svg/research-assistant/analysis-table.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/analysis-table.svg" },
+    { "name": "research-assistant/checklist", "category": "research-assistant", "path": "svg/research-assistant/checklist.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/checklist.svg" },
+    { "name": "research-assistant/document-search", "category": "research-assistant", "path": "svg/research-assistant/document-search.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/document-search.svg" },
+    { "name": "research-assistant/doi-link", "category": "research-assistant", "path": "svg/research-assistant/doi-link.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/doi-link.svg" },
+    { "name": "research-assistant/empty-state-paper", "category": "research-assistant", "path": "svg/research-assistant/empty-state-paper.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/empty-state-paper.svg" },
+    { "name": "research-assistant/pubmed-dna", "category": "research-assistant", "path": "svg/research-assistant/pubmed-dna.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/pubmed-dna.svg" },
+    { "name": "research-assistant/research-assistant-logo-mark", "category": "research-assistant", "path": "svg/research-assistant/research-assistant-logo-mark.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/research-assistant-logo-mark.svg" },
+    { "name": "research-assistant/upload-cloud", "category": "research-assistant", "path": "svg/research-assistant/upload-cloud.svg", "source": "research_assistant_icon_pack/research_assistant_icon_pack/svg/upload-cloud.svg" },
+    { "name": "document-magnifier/document-magnifier-hero", "category": "document-magnifier", "path": "svg/document-magnifier/document-magnifier-hero.svg", "source": "document_magnifier_illustration_pack/document_magnifier_illustration_pack/svg/document-magnifier-hero.svg" }
+  ]
+}

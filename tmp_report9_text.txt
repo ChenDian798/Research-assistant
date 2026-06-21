@@ -1,0 +1,633 @@
+
+--- PAGE 1 ---
+文献分析报告
+跨文献总结
+四篇文献在提取证据中多显示为聚焦于急性缺血性卒中的影像分割，但任务设定、模态和方法差异显著
+。核心趋势是从传统深度学习（U-Net、GAN）向临床知识驱动的方法演进，包括临床启发的预处理、解
+剖先验损失函数以及多专家标注利用策略。多数研究在NCCT这一低资源模态上取得了有临床意义的性能
+提升，但绝对Dice值普遍较低（28.5%-63.85%），且统计证据和可复现性不足。
+共同优势
+
+多数研究聚焦于低资源模态（NCCT、CTP），具有临床转化潜力。
+
+部分工作（如临床预处理、TAGL损失、随机专家采样）通过引入临床知识或训练策略创新，显著提升
+了分割性能。
+
+部分研究使用了公开挑战赛数据集（ISLES’24、ISLES 2018、AISD），便于横向比较。
+共同弱点
+
+部分研究在提取证据中多显示为未提供充分的统计显著性检验（如p值、置信区间），证据强度受限
+。
+
+多数研究未明确公开代码、数据或模型，可复现性存疑。
+
+绝对Dice值普遍较低（28.5%-63.85%），临床可用性需进一步验证。
+
+部分研究样本量较小或未明确报告样本量，泛化性不确定。
+方法模式
+
+从U-Net、GAN等基础架构向结合临床先验（预处理、解剖损失、专家采样）的方向演进。
+
+对抗学习（GAN）在CTP分割中尝试但效果有限（Dice~40%），而临床知识驱动的预处理和损失函数
+在NCCT上表现更优。
+
+基础模型（如DINOv3）与轻量化解码器的结合成为新趋势，兼顾性能与效率。
+证据缺口
+
+部分研究在提取证据中多显示为缺乏与临床金标准（如DWI）在更大规模、多中心数据上的系统比较
+。
+
+多数研究未报告病灶大小、位置等亚组分析，无法评估方法在不同亚群中的表现。
+
+部分研究（如对抗学习）未与无对抗训练的基线进行消融对比，无法归因于方法创新。
+研究空白
+
+
+--- PAGE 2 ---
+
+缺乏统一的、包含多模态（NCCT、CTP、DWI）和临床结局的大规模基准数据集。
+
+现有方法在低资源模态上的绝对性能仍远低于临床可用水平（Dice<0.7），需进一步突破。
+
+临床知识驱动的方法（如预处理、解剖损失）的泛化性和可迁移性尚未充分验证。
+来源与引用
+
+Random Expert Sampling for Deep Learning Segmentation of Acute Ischemic Stroke on Non-contrast
+CT (Ostmeier et al., 2023) - 提供了与临床结局相关性分析的强有力证据，方法简单且具有临床价值。
+
+Clinically-aligned ischemic stroke segmentation and ASPECTS scoring on NCCT imaging using a
+slice-gated loss on foundation representations (Azeem et al., 2026) -
+展示了将解剖先验与基础模型结合的最新趋势，性能领先。
+
+Clinically-Informed Preprocessing Improves Stroke Segmentation in Low-Resource Settings (Heras
+Rivera et al., 2025) - 验证了临床预处理在低资源场景下的有效性，在ISLES’24挑战赛中排名第一。
+
+Ischemic Stroke Lesion Segmentation Using Adversarial Learning (Islam et al., 2018) -
+作为早期尝试，可了解对抗学习在CTP分割中的应用，但证据强度较弱。
+后续行动
+
+在更大规模、多中心数据集上验证临床预处理和TAGL损失的泛化性。
+
+推动代码和数据公开，提升可复现性。
+
+探索将随机专家采样与临床预处理或解剖损失相结合，以进一步提升NCCT分割性能。
+置信度
+中等 - 提取的文本片段提供了清晰的方法和结果，但多数研究缺乏统计显著性检验、误差分析或公开资源
+，且部分研究样本量较小或未明确报告。
+---
+1. Clinically-Informed Preprocessing Improves Stroke Segmentation in
+Low-Resource Settings
+通用事实槽
+字段
+抽取结果
+study_type / 研究类型
+实验研究
+research_objective / 研究目标
+在低资源环境下，利用临床启发的预处理方法，从
+急性期CT图像预测随访DWI上的卒中病灶分割结果
+。
+
+
+--- PAGE 3 ---
+字段
+抽取结果
+dataset_or_material / 数据集、材料、对象
+ISLES’24挑战赛数据集，包含急性NCCT、CTA、C
+TP、DWI及基于DWI的手工标注病灶掩膜。; the
+acute ischemic stroke setting to pre- dict follow-up
+stroke lesion volumes obtained from DWI 2-9 days
+after. For train- ing and evaluation, we use the
+ISLES’24 [23] challenge dataset, which provides
+longitudinal imaging data of stroke patients,
+including acute NCCT, CT angiog- raphy (CTA), CT
+perfusion (CTP), DWI, and ground truth
+hand-annotated lesion masks o; roke lesion
+volumes obtained from DWI 2-9 days after. For
+train- ing and evaluation, we use the ISLES’24 [23]
+challenge dataset, which provides longitudinal
+imaging data of stroke patients, including acute
+NCCT, CT angiog- raphy (CTA), CT perfusion (CTP),
+DWI, and ground truth hand-annotated lesion
+masks obtained from DWI ignal fo
+sample_size / 样本量、实验规模、数据量
+未明确给出总病例数，但使用了10折交叉验证，测
+试集为ISLES’24排行榜评估集。
+domain_or_modality / 领域、模态、对象类型
+医学影像；CT（NCCT, CTA, CTP）→ DWI病灶分割
+method / 方法、模型、干预、框架
+基于nnU-Net框架，结合临床启发的预处理流程：
+去颅骨、自定义窗宽窗位、直方图均衡化；并进一
+步对CTA图预处理提取血管分割作为额外输入。
+baseline_or_comparator / 对照、基线、比较对象
+使用nnU-Net默认预处理（基于百分位）训练的模
+型。; clinically motivated preprocessing steps and
+show that the proposed pipeline results in a 38%
+improvement in Dice score over 10 folds compared
+to a nnU-Net model trained with the baseline
+preprocessing. Finally, we demonstrate that
+through additional preprocessing of CTA maps to
+extract vessel segmentations, we further improve
+our best model le of detecting acute b; asoning
+patterns used by clinicians. Although simple and
+com- putationally inexpensive, we show that the
+proposed pipeline results in a45% improvement in
+performance when compared comparison to a
+model trained with baseline nnU-Net
+preprocessing. Finally, we demonstrate that
+through ad- ditional preprocessing of CTA maps to
+extra
+
+
+--- PAGE 4 ---
+字段
+抽取结果
+evaluation_protocol / 评价或验证方案
+10折交叉验证；最终在ISLES’24测试集上与排行
+榜前两名进行对比。; est Preproc. 0.2167 0.3184
+0.2181 0.1521 0.1696 0.2150 0.0647 + Vessel Segm.
+0.2257 0.3273 0.2129 0.2852 0.2495 0.2601 0.0466 ∆
+(%) +4.2 +2.8 -2.4 +87.5 +47.1 +21.0 -27.9 Table 3:
+Validation Dice scores for the best preprocessing
+pipeline from Section 4.1 versus the same model
+trained with the vessel segmentation replacing
+CTA, evaluated on the same 5-fold split.∆ giv; .3
+ISLES’24 challenge submission The model from
+the best fold as described in Section 4.1 was
+submitted to the ISLES’24 challenge [23] and
+achieved first place [20]. Table 4 shows test set
+evaluation metrics for the top 3 entries in the
+ISLES’24 leaderboard. Team Dice (%) ↑ AVD ↓
+F1 (%) ↑ ALCD ↓ Kurtlab (Ours) 28.50 (21.27) 21
+metrics / 评价指标
+Dice系数、绝对体积差(AVD)、F1分数、绝对病灶计
+数差(ALCD); Dice, F1
+key_results / 关键结果
+临床启发预处理相比基线nnU-Net预处理，Dice提
+升38.4%（10折交叉验证）；在ISLES’24测试集上
+，Kurtlab（本文方法）Dice=28.50(21.27)，AVD=21.
+23(37.22)，F1=14.39(21.19)，ALCD=7.18(7.67)，排
+名第一。; ermore, we implement clinically
+motivated preprocessing steps and show that the
+proposed pipeline results in a 38% improvement in
+Dice score over 10 folds compared to a nnU-Net
+model trained with the baseline preprocessing.
+Finally, we demonstrate that through additional
+prepro; Furthermore, automated segmentation of
+the ischemic core using deep learning methods
+with DWI as input is well-established, with Dice
+scores surpassing 80% when compared to
+clinician-annotated labels [11]. Despite strong
+evidence supporting DWI as superior to NCCT for
+confirming the d; egmentations, we further improve
+our best model by21% over 5 f [Tables] 3 reports
+results across all 5 folds for both approaches. Dice
+Score F old 1 F old 2 F old 3 F old 4 F old 5 Mean
+STD Best Preproc. 0.2167 0.3184 0.2181 0.1521
+0.1696 0.2150 0.0647 + Vessel Segm. 0.2257 0.3; +
+Vessel
+statistical_evidence / 统计证据
+报告了均值（标准差），但未提供显著性检验（如
+p值）或置信区间。
+
+
+--- PAGE 5 ---
+字段
+抽取结果
+availability / 代码、数据、模型、材料公开性
+未明确说明代码、数据或模型的公开情况。
+limitations / 作者承认的局限
+未明确说明（提取片段中未包含作者明确承认的局
+限性陈述）
+evidence_locations / 证据位置
+['Abstract'; 'Methods'; 'Results'; 'Table 4';
+'Discussion']; Dataset/material candidate;
+Comparator candidate; Evaluation candidate;
+Metric candidate
+评审摘要
+链接： 07_clinically_informed_preprocessing_stroke_segmentation_low_resource_arxiv.pdf
+核心贡献： 针对低资源环境中DWI不可及的现实问题，提出了一种计算成本极低、仅依赖CT的预处理方
+案，在ISLES’24挑战赛中取得第一名，验证了临床知识驱动的预处理在数据稀缺场景下的有效性。
+方法/证据： 核心逻辑是：标准nnU-Net预处理（基于百分位）会保留颅骨等高强度无关区域，而卒中病
+灶在CT上仅占很窄的强度范围。因此，模仿临床医生阅片时的操作——先去除颅骨（skull-stripping），
+再设置针对脑实质的窗宽窗位（custom intensity windowing），最后进行直方图均衡化增强对比度——
+使模型能聚焦于病理相关区域。额外对CTA预处理提取血管分割，进一步提供血管解剖先验。
+证据强度： 中等：10折交叉验证和公开排行榜对比提供了可靠的性能证据，但缺乏统计显著性检验，且
+绝对Dice值较低（28.5%），表明任务本身极具挑战性。
+创新点： 将临床实践中医生手动调整窗宽窗位、去颅骨等操作系统化为可复现的预处理流程，并证明其
+在低资源CT→DWI分割任务中优于标准自动预处理。
+主要局限： 未明确说明（提取片段中未包含作者明确承认的局限性陈述）
+文献定位： 核心证据：对于研究低资源医学影像分割的读者，本文是证明“临床知识驱动的预处理”优
+于“通用自动预处理”的强有力案例。可作为方法参考。
+后续建议： 读者应首先验证预处理参数的可复现性（联系作者获取具体数值），然后在自己的低资源CT
+数据集上复现该流程，并与nnU-Net默认预处理进行对比。
+置信度： 较高：提取的正文片段提供了充分的实验细节和结果数据，但缺乏统计检验和局限性讨论。
+2. Ischemic Stroke Lesion Segmentation Using Adversarial Learning
+通用事实槽
+字段
+抽取结果
+study_type / 研究类型
+方法论文
+
+
+--- PAGE 6 ---
+字段
+抽取结果
+research_objective / 研究目标
+利用对抗学习提高CT灌注图像上缺血性脑卒中病灶
+分割的准确性
+dataset_or_material / 数据集、材料、对象
+ISLES 2018挑战赛提供的急性CT灌注数据，包含CT
+、DPWI、CBF三个模态
+sample_size / 样本量、实验规模、数据量
+ISLES 2018数据集，具体病例数未在摘要中明确
+domain_or_modality / 领域、模态、对象类型
+医学影像分割；CT灌注成像（CTP）
+method / 方法、模型、干预、框架
+基于生成对抗网络（GAN）的分割框架：分割器采
+用带跳跃连接和Dropout的U-Net，判别器采用5层
+卷积+LeakyReLU+上采样层的全卷积网络（FCN）
+。分割器与判别器交替训练，分割器旨在生成让判
+别器难以区分真伪的分割图。
+baseline_or_comparator / 对照、基线、比较对象
+U-Net（带跳跃连接和Dropout）作为分割基线网络;
+planning. In this work, we propose a segmentation
+model with adversarial learning for ischemic lesion
+segmentation. We adopt U-Net with skip
+connection and dropout as segmentation baseline
+network and a fully connected net- work (FCN) as
+discriminator network. Discriminator network
+consists of 5 convolution layers followed by
+leaky-ReLU and an upsampling layer to re; ne
+learning techniques in sub-acute and acute stage
+[9]. ISLES 2016 and 2017 [14] presents various deep
+learning models for stroke lesion segmentation
+from multi-modal MRI data. A comparison study
+among different machine learning and
+convolutional neural network (CNN) has done for
+stroke segmentation [10]. Islam et al. [7] explo
+
+
+--- PAGE 7 ---
+字段
+抽取结果
+evaluation_protocol / 评价或验证方案
+交叉验证（训练集）和独立测试集评估; graphy (CT)
+perfusion data pro- vided in ISLES 2018 (Ischemic
+Stroke Lesion Segmentation) for ischemic lesion
+segmentation. Our model has achieved dice
+accuracy of 42.10% with the cross-validation of
+training and 39% with the testing data. 1
+Introduction A stroke occurs due to an interruption
+in blood flow to the brain. The most common form
+of stroke is ischemic stroke [13]; graphy (CT)
+perfusion data pro- vided in ISLES 2018 (Ischemic
+Stroke Lesion Segmentation) for ischemic lesion
+segmentation. Our model has achieved dice
+accuracy of 42.10% with the cross-validation of
+training and 39% with the testing data. [Tables] 2
+gives details about the performance of our model
+on the test data set.
+metrics / 评价指标
+Dice系数（文中称为dice accuracy）; Dice,
+Accuracy, precision, recall
+key_results / 关键结果
+训练集交叉验证Dice=42.10%，测试集Dice=39%;
+sion data pro- vided in ISLES 2018 (Ischemic Stroke
+Lesion Segmentation) for ischemic lesion
+segmentation. Our model has achieved dice
+accuracy of 42.10% with the cross-validation of
+training and 39% with the testing data. 1
+Introduction A stroke occurs due to an interruption
+in blo; sion data pro- vided in ISLES 2018 (Ischemic
+Stroke Lesion Segmentation) for ischemic lesion
+segmentation. Our model has achieved dice
+accuracy of 42.10% with the cross-validation of
+training and 39% with the testing data. [Tables] 2
+gives details about the performance of our model;
+n performance of different models with training
+dataset Models Ours PixelNet [7] U-Net [12]
+Deeplab v2 [2] ICNet [15] PSPNet [16] Dice 0.421
+0.409 0.419 0.373 0.387 0.319 T able 2. Performance
+of our model with testing dataset Dice Hausdorff
+Avg Distance Precision Recal; ab v2 [2] ICNet [15]
+PSPNet [16] Dice 0.421 0.409 0.419 0.3
+statistical_evidence / 统计证据
+未报告显著性检验、置信区间或误差棒
+availability / 代码、数据、模型、材料公开性
+未提及代码或数据是否公开
+limitations / 作者承认的局限
+未明确说明
+
+
+--- PAGE 8 ---
+字段
+抽取结果
+evidence_locations / 证据位置
+['Abstract'; 'Introduction'; 'Methods（第3页）';
+'Results（摘要）']; Comparator candidate;
+Evaluation candidate; Metric candidate
+评审摘要
+链接： 09_ischemic_stroke_lesion_segmentation_adversarial_learning_ctp_arxiv.pdf
+核心贡献： 本文尝试将对抗训练机制（GAN）应用于CTP模态的卒中病灶分割任务，探索了分割器与判
+别器联合训练的策略，是早期将对抗学习用于该任务的工作之一。
+方法/证据： 构建一个分割器（U-Net）和一个判别器（FCN）。分割器生成病灶分割图，判别器判断该
+分割图是来自真实标注还是分割器输出。两者交替训练：分割器试图生成以假乱真的分割图，判别器则
+努力提高辨别能力。最终分割器在对抗训练中学习到更接近真实标注的分布。
+证据强度： 弱：仅报告了Dice系数，无统计检验、无误差范围、无与多个基线的系统对比，且Dice值（~
+40%）较低，难以判断对抗学习是否带来显著提升。
+创新点： 将对抗学习从MRI模态迁移到CTP模态的卒中病灶分割，但方法本身（U-Net+GAN）并非原创，
+属于已有技术的直接应用。
+主要局限： 未明确说明
+文献定位： 需谨慎参考的反例：该论文展示了早期尝试，但方法设计和实验验证均不充分，不应作为核
+心证据或方法参考。建议读者将其作为背景了解，并转向更成熟、验证更充分的工作。
+后续建议： 1) 阅读ISLES 2018挑战赛的总结论文，了解该数据集上的最佳方法及性能上限；2)
+对比后续使用更先进架构（如nnU-Net、Transformer）的CTP分割工作；3)
+若需使用对抗学习，应参考更近期的、有充分消融实验的文献。
+置信度： 较低：提取片段有限，且报告的结果和实验细节不足以支撑强结论。
+3. Clinically-aligned ischemic stroke segmentation and ASPECTS scoring on
+NCCT imaging using a slice-gated loss on foundation representations
+通用事实槽
+字段
+抽取结果
+study_type / 研究类型
+方法论文
+research_objective / 研究目标
+提出一种临床对齐的NCCT梗死分割与ASPECTS区
+域勾画框架，通过引入解剖先验（基底节与基底节
+上水平的耦合关系）提升分割性能，且不增加推理
+复杂度。
+
+
+--- PAGE 9 ---
+字段
+抽取结果
+dataset_or_material / 数据集、材料、对象
+AISD (公开数据集) 和 一个私有ASPECTS数据集;
+ervision adds no inference- time complexity. Our
+method achieves a Dice score of 0.6385 on AISD,
+outperforming prior CNN and foundation-model
+baselines. On a pro- prietary ASPECTS dataset,
+TAGL improves mean Dice from 0.698 t , availability,
+and abil- ity to exclude hemorrhage [12]. However,
+early ischemic changes on NCCT are subtle and
+low-contrast, making reliabl; is present. This
+introduces a structured inductive bias aligned with
+radiologist practice, without increasing
+inference-time complexity. We evaluate our
+method on the public AISD dataset [11] and a
+proprietary NCCT dataset with expert-annotated
+ASPECTS regions. Results demonstrate strong
+segmentation performance with high computa
+sample_size / 样本量、实验规模、数据量
+AISD数据集上报告Dice=0.6385；私有ASPECTS数据
+集上报告平均Dice从0.698提升至0.767。具体样本
+量未在提取片段中明确。
+domain_or_modality / 领域、模态、对象类型
+医学影像 (非增强CT,
+NCCT)；缺血性卒中；ASPECTS评分
+method / 方法、模型、干预、框架
+使用冻结的DINOv3自监督视觉Transformer作为骨
+干网络，搭配轻量化解码器；提出Territory-Aware
+Gated Loss (TAGL)，该损失函数仅在基底节(BG)预
+测概率超过阈值τ的位置激活，并通过自适应权重（
+基于切片级置信度）调节惩罚强度，以强制BG与SG
+水平的分割一致性。
+
+
+--- PAGE 10 ---
+字段
+抽取结果
+baseline_or_comparator / 对照、基线、比较对象
+先前的CNN和基础模型基线（具体名称未在提取片
+段中列出，但提及“outperforming prior CNN and
+foundation-model baselines”）; S, we
+additionally report region-wise Dice scores to
+assess performance across individual territories. All
+results are averaged over the test set. BaselinesWe
+compare our approach against representative
+CNN-based seg- mentation models and recent
+foundation-model-based methods. For fair com-
+parison, all baselines are evaluated using their
+officially reported settin; r severe class imbalance.
+Our final model achieves a Dice score of 0.6385,
+representing a large margin over previously
+reported results. Compared to the frozen DINOv3
+benchmarking baseline (Dice= 0.3674), our
+approach nearly doubles segmentation accuracy
+while retaining a lightweight architecture. It also
+outperforms StrDiSeg wit
+evaluation_protocol / 评价或验证方案
+在AISD和私有ASPECTS数据集上评估；使用Dice系
+数作为主要指标；通过对比有无TAGL（即BG-SG一
+致性约束）来验证方法有效性。; (mIoU) for
+segmentation quality. For ASPECTS, we
+additionally report region-wise Dice scores to
+assess performance across individual territories. All
+results are averaged over the test set. BaselinesWe
+compare our approach against representative
+CNN-based seg- mentation models and recent
+foundation-model-based methods. For fair com-
+parison, all baselines are evalua
+metrics / 评价指标
+Dice系数; Dice, Accuracy
+
+
+--- PAGE 11 ---
+字段
+抽取结果
+key_results / 关键结果
+在AISD上Dice=0.6385，优于先前CNN和基础模型基
+线；在私有ASPECTS数据集上，TAGL将平均Dice从
+0.698提升至0.767。; G consistency dur- ing
+training. This anatomically informed supervision
+adds no inference- time complexity. Our method
+achieves a Dice score of 0.6385 on AISD,
+outperforming prior CNN and foundation-model
+baselines. On a pro- prietary ASPECTS dataset,
+TAGL improves mean Dice from; core of 0.6385 on
+AISD, outperforming prior CNN and
+foundation-model baselines. On a pro- prietary
+ASPECTS dataset, TAGL improves mean Dice from
+0.698 t , availability, and abil- ity to exclude
+hemorrhage [12]. However, early ischemic changes
+on NCCT are subtle and low-contrast; core of
+0.6385 on AISD, outperforming prior CNN and
+foundation-model baselines. On a pro- prietary
+ASPECTS dataset, TAGL improves mean Dice from
+0.698 to 0.767. These results demonstrate that
+integrating foundation representa- tions with
+structured clinical priors improves NCCT s; over
+BCE alone, confirming the importance of
+overlap-bas
+statistical_evidence / 统计证据
+未在提取片段中明确报告显著性检验、置信区间或
+误差棒。
+availability / 代码、数据、模型、材料公开性
+未在提取片段中说明代码、数据或模型的公开情况
+。
+limitations / 作者承认的局限
+While effective, these CNN-based methods remain
+limited by local receptive fields, restricting
+long-range contextual reason- ing required for
+anatomically structured infarcts
+evidence_locations / 证据位置
+['Abstract'; 'Methods'; 'Results']; Dataset/material
+candidate; Comparator candidate; Evaluation
+candidate; Limitations/Discussion; Metric
+candidate
+评审摘要
+链接： 10_clinically_aligned_ischemic_stroke_segmentation_aspects_ncct_arxiv.pdf
+核心贡献： 针对现有深度学习方法忽略ASPECTS评分中BG-SG解剖耦合的问题，提出了一种新颖的、可
+即插即用的损失函数TAGL，将临床先验知识融入基于基础模型（DINOv3）的分割框架中。该方法在保持
+高效性的同时，在公开和私有数据集上均取得了优于现有基线的结果。
+
+
+--- PAGE 12 ---
+方法/证据： 方法逻辑：首先，使用一个冻结的、在大规模数据上自监督预训练的DINOv3 ViT作为特征提
+取器，以获取通用且鲁棒的特征表示，避免端到端微调的高计算成本。然后，训练一个轻量化解码器来
+生成分割图。核心创新在于训练损失函数TAGL：它不独立处理每个像素，而是强制对齐基底节(BG)切片
+和基底节上(SG)切片的分割结果。具体地，TAGL只在BG预测概率高的位置（通过阈值τ的门控）激活，
+并根据BG和SG切片的整体置信度动态调整惩罚权重。这样，模型在学习分割时，会隐含地学习到“如果
+BG区域有梗死，对应的SG区域也应有梗死”这一临床规则。
+证据强度： 中等，因为结果在公开和私有数据集上均有报告且提升显著，但缺乏统计显著性检验、误差
+分析以及更全面的消融实验细节。
+创新点： 创新点在于将ASPECTS评分中BG-SG的临床耦合关系形式化为一个可微的、轻量级的损失函数
+（TAGL），并将其与冻结的基础模型结合，实现了临床知识与深度学习的有效融合，且不增加推理成本
+。
+主要局限： While effective, these CNN-based methods remain limited by local receptive fields, restricting
+long-range contextual reason- ing required for anatomically structured infarcts
+文献定位： 核心证据/方法参考。该论文为将临床先验知识融入基于基础模型的医学影像分割任务提供了
+一个有价值的范例，特别是其提出的TAGL损失函数，可作为后续研究在类似任务（如其他器官的解剖耦
+合分割）中的参考。
+后续建议： 建议读者阅读论文全文，重点关注TAGL损失函数的数学细节和消融实验，以评估其在不同设
+置下的鲁棒性。同时，应寻找在更大规模、多中心NCCT数据集上的验证结果。
+置信度： 中等，因为提取片段提供了清晰的方法和结果，但缺乏关键的统计细节和基线信息。
+4. Random Expert Sampling for Deep Learning Segmentation of Acute
+Ischemic Stroke on Non-contrast CT
+通用事实槽
+字段
+抽取结果
+study_type / 研究类型
+实验研究
+research_objective / 研究目标
+评估随机专家采样（Random Expert Sampling）训
+练策略在非增强CT（NCCT）上自动分割急性缺血
+性脑卒中病灶的效果，并与传统多专家融合方法及
+CT灌注成像比较。
+
+
+--- PAGE 13 ---
+字段
+抽取结果
+dataset_or_material / 数据集、材料、对象
+DEFUSE 3试验中233例急性缺血性卒中患者的260次
+非增强CT扫描；三位经验丰富的神经放射科医师的
+参考标注；24小时随访DWI（最终梗死核心）及临
+床结局（mRS 30/90天）; 3273 words in total
+arXiv:2309.03930v1 [cs.CV] 7 Sep 2023 [Page 2]
+Abstract Purpose To automatically identify the
+presence and location of ischemic brain tissue on
+Non-Contrast CT Materials and Methods The data
+set consisted of 260 Non-Contrast CTs from 233
+patients of acute ischemic stroke patients recruited
+in the DEFUSE 3 trial. A benchmark U-Net was
+trained on th; 2309.03930v1 [cs.CV] 7 Sep 2023
+[Page 2] Abstract Purpose To automatically identify
+the presence and location of ischemic brain tissue
+on Non-Contrast CT Materials and Methods The
+data set consisted of 260 Non-Contrast CTs from
+233 patients of acute ischemic stroke patients
+recruited in the DEFUSE 3 trial. A benchmark U-Net
+was
+sample_size / 样本量、实验规模、数据量
+260次NCCT扫描（来自233例患者）; 233 patients
+domain_or_modality / 领域、模态、对象类型
+医学影像；急性缺血性卒中；非增强CT（NCCT）
+分割
+method / 方法、模型、干预、框架
+随机专家采样（Random Expert Sampling）：训练
+时从多位专家标注中随机选取一个作为当前epoch
+的ground truth，而非使用融合后的单一标签。基
+准模型为U-Net。
+baseline_or_comparator / 对照、基线、比较对象
+传统多专家标注融合方法（如多数投票、STAPLE）
+；CT灌注成像（CTP）; B, C Random expert
+sampling nnUNet Random Expert Eampling
+Prediction agreements* Majority vote Prediction
+agreements* Random Expert Sampling Prediction
+agreements* Experts B, C, A Comparison Experts A,
+B, C Experts A, B, C Figure 3: First two model were
+trained on majority vote and random expert
+sampling. Second, the median agreement per case
+for inter-expert agreemen
+evaluation_protocol / 评价或验证方案
+使用bootstrap点估计评估训练方案与专家间一致性
+及方差比；将预测体积与24h随访DWI（最终梗死核
+心）在完全再灌注亚组中比较；用Spearman方法
+测试体积与临床结局（mRS 30/90天）的相关性。
+metrics / 评价指标
+Dice相似系数（Dice）、Tolerance 5mm（容差5m
+m下的指标）、体积相关性（Spearman相关系数）
+
+
+--- PAGE 14 ---
+字段
+抽取结果
+key_results / 关键结果
+随机专家采样模型在Tolerance 5mm上提升61%（
+达到0.70±0.03），Dice提升25%（达到0.50±0.04
+）。模型预测体积与最终梗死体积的估计相似，且
+与临床结局的相关性优于CT灌注成像。; s than
+experts agree among themselves and better
+agreement than the agr ice at Tolerance 5mm
+improvement of 61% to 0.70 ±0.03 and Dice
+improvement of 25% to 0.50 ±0.04). The
+model-based predicted volume similarly estimated
+the final infarct volume and correlated better to the
+clinic; rts agree among themselves and better
+agreement than the agreement between experts
+and a majority-vote model performance (Surface
+Dice at Tolerance 5mm improvement of 61% to
+0.70 ±0.03 and Dice improvement of 25% to 0.50
+±0.04). The model-based predicted volume
+similarly estimat; reement between experts and a
+majority-vote model performance (Surface Dice at
+Tolerance 5mm improvement of 61% to 0.70 ±0.03
+and Dice improvement of 25% to 0.50 ±0.04). The
+model-based predicted volume similarly estimated
+the final infarct volume and correlated better to the
+clinic
+statistical_evidence / 统计证据
+报告了均值±标准差（如0.70±0.03, 0.50±0.04）
+，使用bootstrap进行一致性分析，Spearman方法
+检验相关性。
+availability / 代码、数据、模型、材料公开性
+未明确说明代码或数据是否公开。
+limitations / 作者承认的局限
+未明确说明
+evidence_locations / 证据位置
+['Abstract'; 'Methods'; 'Results'; 'Conclusion'];
+Sample-size candidate; Dataset/material
+candidate; Comparator candidate; Metric
+candidate
+评审摘要
+链接： 08_random_expert_sampling_deep_learning_segmentation_ais_ncct_arxiv.pdf
+核心贡献： 提出并验证了一种简单但有效的训练策略（随机专家采样），用于解决多专家标注不一致问
+题，在低资源模态（NCCT）上实现了接近CT灌注成像的临床价值，具有重要的临床转化潜力。
+方法/证据： 传统方法将多位专家的标注融合（如多数投票或STAPLE）成一个单一ground truth用于训练
+。本文提出在训练每个epoch时，随机从多位专家的标注中选择一个作为该epoch的ground truth。这样
+模型在训练过程中会接触到不同专家的标注风格和偏差，从而学习到更鲁棒的特征，而不是强制拟合一
+
+
+--- PAGE 15 ---
+个可能丢失信息的融合标签。
+证据强度： 中等；结果基于单一数据集（DEFUSE
+3），样本量中等（260次扫描），但提供了与临床结局的相关性分析，增强了证据的临床相关性。
+创新点： 将随机专家采样这一简单策略引入医学影像分割训练，替代复杂的多专家标注融合方法，并证
+明其在NCCT卒中分割上的有效性。
+主要局限： 未明确说明
+文献定位： 核心证据：本文为多专家标注利用提供了新的视角，可作为方法参考。读者应将其与传统的S
+TAPLE、多数投票等方法对比，并考虑在自身任务中尝试。
+后续建议： 建议读者在类似的多专家标注分割任务中，将随机专家采样作为基线方法之一进行对比；同
+时，建议作者在后续工作中公开代码并增加多数据集验证。
+置信度： 中等；提取的文本片段提供了核心结果和方法描述，但缺乏完整的实验细节和消融研究。

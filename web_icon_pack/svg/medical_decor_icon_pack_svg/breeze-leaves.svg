@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Breeze with leaves decorative icon</title>
+  <desc id="desc">A fresh breeze icon with leaf accents in a bright restrained medical palette.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <g stroke-width="3.5" class="soft">
+    <path class="line" stroke="#00C6C8" d="M96 324 C162 278 218 222 236 142"/>
+    <path class="line" stroke="#00B8FF" d="M162 376 C236 318 310 242 324 106"/>
+    <path class="line" stroke="#00C6C8" d="M236 398 C318 336 390 262 414 168"/>
+  </g>
+  <g stroke-width="2.5">
+    <path class="line" stroke="#00A856" d="M314 168 C352 134 392 146 414 174 C380 198 342 200 314 168 Z"/>
+    <path class="line" stroke="#00A856" d="M350 280 C392 248 434 262 454 296 C416 318 378 314 350 280 Z"/>
+    <path class="line" stroke="#00A856" d="M170 250 C200 226 232 236 250 260 C220 282 190 280 170 250 Z"/>
+    <path class="line" stroke="#00A856" d="M330 168 L386 174"/>
+    <path class="line" stroke="#00A856" d="M368 282 L430 294"/>
+  </g>
+  <circle class="dot" fill="#00C6C8" cx="118" cy="244" r="7"/>
+  <circle class="dot" fill="#00A856" cx="286" cy="318" r="7"/>
+
+</svg>

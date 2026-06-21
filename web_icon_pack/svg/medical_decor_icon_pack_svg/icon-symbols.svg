@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+<symbol id="firework-burst" viewBox="0 0 512 512">
+
+  <g stroke-width="3" class="soft">
+    <path class="line" stroke="#005CFF" d="M256 114 C250 166 250 166 256 210"/>
+    <path class="line" stroke="#00B8FF" d="M256 302 C250 354 250 354 256 398"/>
+    <path class="line" stroke="#00C6C8" d="M114 256 C166 250 166 250 210 256"/>
+    <path class="line" stroke="#00B8FF" d="M302 256 C354 250 354 250 398 256"/>
+    <path class="line" stroke="#FF2A8A" d="M154 154 C192 190 202 200 224 225"/>
+    <path class="line" stroke="#FFB000" d="M358 154 C320 190 310 200 288 225"/>
+    <path class="line" stroke="#00A856" d="M154 358 C192 322 202 312 224 287"/>
+    <path class="line" stroke="#005CFF" d="M358 358 C320 322 310 312 288 287"/>
+    <path class="line" stroke="#FF2A8A" d="M184 106 C196 142 204 166 220 194"/>
+    <path class="line" stroke="#00B8FF" d="M328 106 C316 142 308 166 292 194"/>
+    <path class="line" stroke="#00C6C8" d="M184 406 C196 370 204 346 220 318"/>
+    <path class="line" stroke="#FFB000" d="M328 406 C316 370 308 346 292 318"/>
+  </g>
+  <polygon points="256.0,218.0 266.0,242.2 292.1,244.3 272.2,261.3 278.3,286.7 256.0,273.0 233.7,286.7 239.8,261.3 219.9,244.3 246.0,242.2" class="line" stroke="#FFB000" stroke-width="2.5"/>
+  <circle class="dot" fill="#005CFF" cx="120" cy="154" r="9"/>
+  <circle class="dot" fill="#00B8FF" cx="402" cy="154" r="7"/>
+  <circle class="dot" fill="#00C6C8" cx="102" cy="318" r="7"/>
+  <circle class="dot" fill="#FF2A8A" cx="410" cy="316" r="8"/>
+  <circle class="dot" fill="#00A856" cx="256" cy="94" r="7"/>
+  <circle class="dot" fill="#FFB000" cx="256" cy="420" r="7"/>
+
+
+</symbol><symbol id="sparkle-cluster" viewBox="0 0 512 512">
+
+  <path class="line" stroke="#FFB000" stroke-width="3" d="M 228,106 C 264,162 264,162 320,198 C 264,234 264,234 228,290 C 192,234 192,234 136,198 C 192,162 192,162 228,106 Z"/>
+  <path class="line" stroke="#FF2A8A" stroke-width="3" d="M 150,264 C 172,296 172,296 204,318 C 172,340 172,340 150,372 C 128,340 128,340 96,318 C 128,296 128,296 150,264 Z"/>
+  <path class="line" stroke="#00C6C8" stroke-width="3" d="M 342,228 C 368,266 368,266 406,292 C 368,318 368,318 342,356 C 316,318 316,318 278,292 C 316,266 316,266 342,228 Z"/>
+  <path class="line" stroke="#005CFF" stroke-width="2.5" d="M 340,352 C 352,368 352,368 368,380 C 352,392 352,392 340,408 C 328,392 328,392 312,380 C 328,368 328,368 340,352 Z"/>
+  <path class="line" stroke="#00B8FF" stroke-width="2" d="M92 228 h34 M109 211 v34"/>
+  <path class="line" stroke="#005CFF" stroke-width="2" d="M410 178 h24 M422 166 v24"/>
+  <circle class="dot" fill="#FF2A8A" cx="405" cy="334" r="8"/>
+  <circle class="dot" fill="#00B8FF" cx="118" cy="386" r="7"/>
+
+
+</symbol><symbol id="confetti-burst" viewBox="0 0 512 512">
+
+  <g stroke-width="3" class="soft">
+    <path class="line" stroke="#00B8FF" d="M176 374 C176 318 190 270 222 214"/>
+    <path class="line" stroke="#005CFF" d="M254 390 C260 318 266 270 270 198"/>
+    <path class="line" stroke="#00C6C8" d="M336 374 C330 318 314 270 290 216"/>
+    <path class="line" stroke="#FF2A8A" d="M132 314 C162 282 178 252 190 218"/>
+    <path class="line" stroke="#005CFF" d="M380 312 C350 282 334 252 320 218"/>
+  </g>
+  <rect x="136" y="124" width="34" height="34" rx="3" class="line" stroke="#FFB000" stroke-width="2.5" transform="rotate(-24 153 141)"/>
+  <rect x="238" y="86" width="38" height="38" rx="3" class="line" stroke="#00C6C8" stroke-width="2.5" transform="rotate(-14 257 105)"/>
+  <rect x="344" y="136" width="30" height="30" rx="3" class="line" stroke="#005CFF" stroke-width="2.5" transform="rotate(34 359 151)"/>
+  <rect x="328" y="268" width="32" height="32" rx="3" class="line" stroke="#FFB000" stroke-width="2.5" transform="rotate(-32 344 284)"/>
+  <circle class="line" stroke="#FF2A8A" stroke-width="2.5" cx="192" cy="96" r="13"/>
+  <circle class="dot" fill="#00B8FF" cx="226" cy="272" r="8"/>
+  <circle class="dot" fill="#FFB000" cx="294" cy="142" r="7"/>
+  <polygon points="406.0,74.0 413.6,93.5 434.5,94.7 418.4,108.0 423.6,128.3 406.0,117.0 388.4,128.3 393.6,108.0 377.5,94.7 398.4,93.5" class="line" stroke="#005CFF" stroke-width="2"/>
+
+
+</symbol><symbol id="airflow-swirl" viewBox="0 0 512 512">
+
+  <g stroke-width="3.5" class="soft">
+    <path class="line" stroke="#005CFF" d="M76 214 C158 190 260 188 332 226 C374 248 424 236 430 190 C436 144 386 124 354 154 C330 176 340 214 372 214"/>
+    <path class="line" stroke="#00B8FF" d="M92 284 C184 266 282 270 354 302 C392 318 430 302 430 264 C430 232 398 218 374 236 C354 250 356 280 382 282"/>
+    <path class="line" stroke="#005CFF" d="M128 350 C210 330 282 340 336 364 C366 378 394 362 394 334 C394 310 370 300 352 314 C338 326 340 350 360 350"/>
+  </g>
+  <circle class="dot" fill="#00B8FF" cx="104" cy="342" r="8"/>
+  <circle class="dot" fill="#005CFF" cx="432" cy="336" r="7"/>
+
+
+</symbol><symbol id="breeze-leaves" viewBox="0 0 512 512">
+
+  <g stroke-width="3.5" class="soft">
+    <path class="line" stroke="#00C6C8" d="M96 324 C162 278 218 222 236 142"/>
+    <path class="line" stroke="#00B8FF" d="M162 376 C236 318 310 242 324 106"/>
+    <path class="line" stroke="#00C6C8" d="M236 398 C318 336 390 262 414 168"/>
+  </g>
+  <g stroke-width="2.5">
+    <path class="line" stroke="#00A856" d="M314 168 C352 134 392 146 414 174 C380 198 342 200 314 168 Z"/>
+    <path class="line" stroke="#00A856" d="M350 280 C392 248 434 262 454 296 C416 318 378 314 350 280 Z"/>
+    <path class="line" stroke="#00A856" d="M170 250 C200 226 232 236 250 260 C220 282 190 280 170 250 Z"/>
+    <path class="line" stroke="#00A856" d="M330 168 L386 174"/>
+    <path class="line" stroke="#00A856" d="M368 282 L430 294"/>
+  </g>
+  <circle class="dot" fill="#00C6C8" cx="118" cy="244" r="7"/>
+  <circle class="dot" fill="#00A856" cx="286" cy="318" r="7"/>
+
+
+</symbol><symbol id="ribbon-swirl" viewBox="0 0 512 512">
+
+  <path class="line" stroke="#FF2A8A" stroke-width="2" d="M132 124 C236 54 326 124 274 204 C230 270 124 284 116 370 C110 438 236 434 286 356"/>
+  <path class="line" stroke="#005CFF" stroke-width="2" d="M292 164 C198 180 170 252 238 288 C314 328 378 286 358 222 C344 178 292 168 250 198"/>
+  <path class="line" stroke="#00B8FF" stroke-width="2.5" opacity=".75" d="M152 136 C218 100 276 124 250 170"/>
+  <circle class="dot" fill="#00C6C8" cx="342" cy="350" r="8"/>
+  <circle class="dot" fill="#FF2A8A" cx="140" cy="374" r="7"/>
+
+
+</symbol><symbol id="shooting-star" viewBox="0 0 512 512">
+
+  <polygon points="330.0,116.0 345.3,153.0 385.2,156.1 354.7,182.0 364.1,220.9 330.0,200.0 295.9,220.9 305.3,182.0 274.8,156.1 314.7,153.0" class="line" stroke="#FFB000" stroke-width="3"/>
+  <g stroke-width="3.5" class="soft">
+    <path class="line" stroke="#005CFF" d="M78 302 C152 248 208 212 274 190"/>
+    <path class="line" stroke="#00B8FF" d="M130 356 C190 292 230 250 292 218"/>
+    <path class="line" stroke="#FF2A8A" d="M84 404 C148 336 190 296 252 260"/>
+  </g>
+  <path class="line" stroke="#00C6C8" stroke-width="2.5" d="M 344,316 C 354,332 354,332 370,342 C 354,352 354,352 344,368 C 334,352 334,352 318,342 C 334,332 334,332 344,316 Z"/>
+  <circle class="dot" fill="#FFB000" cx="216" cy="330" r="8"/>
+  <circle class="dot" fill="#00B8FF" cx="114" cy="224" r="7"/>
+
+
+</symbol><symbol id="comet" viewBox="0 0 512 512">
+
+  <circle cx="156" cy="358" r="38" class="line" stroke="#00C6C8" stroke-width="3"/>
+  <g stroke-width="3.5" class="soft">
+    <path class="line" stroke="#005CFF" d="M184 332 C246 252 318 182 426 102"/>
+    <path class="line" stroke="#00B8FF" d="M198 358 C280 300 342 248 430 204"/>
+    <path class="line" stroke="#00C6C8" d="M178 386 C248 352 306 324 374 300"/>
+  </g>
+  <path class="line" stroke="#00B8FF" stroke-width="2" d="M236 340 C278 288 318 248 372 210"/>
+  <circle class="dot" fill="#005CFF" cx="94" cy="402" r="8"/>
+  <circle class="dot" fill="#00C6C8" cx="316" cy="354" r="8"/>
+  <path class="line" stroke="#00C6C8" stroke-width="2.5" d="M 386,358 C 396,374 396,374 412,384 C 396,394 396,394 386,410 C 376,394 376,394 360,384 C 376,374 376,374 386,358 Z"/>
+
+
+</symbol><symbol id="cloud-puff" viewBox="0 0 512 512">
+
+  <path class="line" stroke="#005CFF" stroke-width="3.5" d="M130 330 C86 324 70 288 88 256 C106 224 138 218 166 232 C176 186 214 154 260 158 C306 162 334 194 342 238 C384 236 420 264 422 306 C424 350 390 380 344 380 H150 C116 380 92 360 92 330 C92 306 108 290 130 286"/>
+  <path class="line" stroke="#00B8FF" stroke-width="2.5" d="M166 232 C190 234 212 250 224 274"/>
+  <path class="line" stroke="#00C6C8" stroke-width="2.5" d="M284 380 C314 372 338 352 348 324"/>
+  <path class="line" stroke="#00B8FF" stroke-width="2.5" d="M108 178 L92 154 M134 164 L132 134 M390 182 L414 160 M406 220 L438 214"/>
+  <circle class="dot" fill="#00B8FF" cx="404" cy="386" r="7"/>
+
+
+</symbol><symbol id="radiant-sparkle" viewBox="0 0 512 512">
+
+  <path class="line" stroke="#FFB000" stroke-width="3.5" d="M 256,186 C 284,228 284,228 326,256 C 284,284 284,284 256,326 C 228,284 228,284 186,256 C 228,228 228,228 256,186 Z"/>
+  <g stroke-width="3" class="soft">
+    <path class="line" stroke="#FFB000" d="M256 78 V132"/>
+    <path class="line" stroke="#FF2A8A" d="M256 380 V434"/>
+    <path class="line" stroke="#FFB000" d="M78 256 H132"/>
+    <path class="line" stroke="#00B8FF" d="M380 256 H434"/>
+    <path class="line" stroke="#FF2A8A" d="M132 132 L166 166"/>
+    <path class="line" stroke="#005CFF" d="M346 346 L380 380"/>
+    <path class="line" stroke="#005CFF" d="M132 380 L166 346"/>
+    <path class="line" stroke="#FF2A8A" d="M346 166 L380 132"/>
+  </g>
+  <circle class="line" stroke="#FF2A8A" stroke-width="2.5" cx="132" cy="220" r="12"/>
+  <circle class="dot" fill="#00B8FF" cx="392" cy="306" r="8"/>
+  <circle class="dot" fill="#FFB000" cx="354" cy="96" r="7"/>
+
+
+</symbol>
+</svg>

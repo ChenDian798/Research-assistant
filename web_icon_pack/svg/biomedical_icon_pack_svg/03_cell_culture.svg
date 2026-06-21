@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Cell culture dish icon</title>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #111111; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+      .thin { fill: none; stroke: #111111; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+      .micro { fill: none; stroke: #111111; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .white { fill: #ffffff; }
+      .blue { fill: #1e9bef; }
+      .red { fill: #ff4a3d; }
+      .yellow { fill: #ffb21c; }
+      .gray { fill: #efefef; }
+      .black { fill: #111111; }
+    </style>
+  </defs>
+  <g id="background-ring">
+    <circle cx="64" cy="64" r="56" fill="#ffffff" stroke="#FFAB13" stroke-width="6"/>
+  </g>
+  <g id="icon" transform="translate(0 0)">
+    <g id="cell-culture-dish">
+      <ellipse cx="64" cy="72" rx="39" ry="27" fill="#ffffff" stroke="#111111" stroke-width="4.2"/>
+      <path d="M28 78c15 21 55 25 79 1-4 20-23 30-43 30S31 97 28 78z" fill="#7cc8ff" stroke="#111111" stroke-width="3" stroke-linejoin="round"/>
+      <ellipse cx="64" cy="64" rx="35" ry="22" fill="none" stroke="#111111" stroke-width="3"/>
+      <circle cx="52" cy="59" r="6" fill="#ffb21c" stroke="#111111" stroke-width="3"/>
+      <circle cx="77" cy="56" r="6" fill="#7cc8ff" stroke="#111111" stroke-width="3"/>
+      <circle cx="83" cy="72" r="3.5" fill="#111111"/>
+      <circle cx="58" cy="75" r="3" fill="#111111"/>
+      <circle cx="42" cy="72" r="2.8" fill="#111111"/>
+      <path d="M60 88c6-9 18-10 22-2 2 5-4 10-13 10-8 0-13-3-9-8z" fill="#ff4a3d" stroke="#111111" stroke-width="3" stroke-linejoin="round"/>
+      <circle cx="72" cy="47" r="2.5" fill="#111111"/>
+      <circle cx="86" cy="61" r="2.2" fill="#111111"/>
+      <circle cx="49" cy="88" r="2.3" fill="#111111"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Biomedical microscope icon</title>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #111111; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+      .thin { fill: none; stroke: #111111; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+      .micro { fill: none; stroke: #111111; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .white { fill: #ffffff; }
+      .blue { fill: #1e9bef; }
+      .red { fill: #ff4a3d; }
+      .yellow { fill: #ffb21c; }
+      .gray { fill: #efefef; }
+      .black { fill: #111111; }
+    </style>
+  </defs>
+  <g id="background-ring">
+    <circle cx="64" cy="64" r="56" fill="#ffffff" stroke="#1685E8" stroke-width="6"/>
+  </g>
+  <g id="icon" transform="translate(0 0)">
+    <g id="microscope-body">
+      <path class="outline white" d="M62 31l13 8-25 43-13-8z"/>
+      <path class="outline white" d="M58 22l14 8-6 10-14-8z"/>
+      <circle cx="58" cy="51" r="8" fill="#ffffff" stroke="#111111" stroke-width="4"/>
+      <circle cx="58" cy="51" r="4" fill="#1e9bef"/>
+      <path class="outline" d="M43 80h31"/>
+      <path class="outline" d="M40 88h39"/>
+      <path class="outline white" d="M37 87v12h45"/>
+      <path class="outline" d="M76 59c14 15 9 36-12 42"/>
+      <circle cx="64" cy="101" r="4" fill="#1e9bef" stroke="#111111" stroke-width="3"/>
+      <path class="outline white" d="M35 103h42"/>
+      <path class="outline" d="M31 109h52"/>
+      <path class="thin" d="M69 40l9 5"/>
+      <path class="thin" d="M38 74l9 5"/>
+      <path class="thin" d="M41 60l-12 21"/>
+      <path class="thin" d="M28 79h18"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Ribbon swirl decorative icon</title>
+  <desc id="desc">A simple vivid ribbon-like swirl for accent decoration.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <path class="line" stroke="#FF2A8A" stroke-width="2" d="M132 124 C236 54 326 124 274 204 C230 270 124 284 116 370 C110 438 236 434 286 356"/>
+  <path class="line" stroke="#005CFF" stroke-width="2" d="M292 164 C198 180 170 252 238 288 C314 328 378 286 358 222 C344 178 292 168 250 198"/>
+  <path class="line" stroke="#00B8FF" stroke-width="2.5" opacity=".75" d="M152 136 C218 100 276 124 250 170"/>
+  <circle class="dot" fill="#00C6C8" cx="342" cy="350" r="8"/>
+  <circle class="dot" fill="#FF2A8A" cx="140" cy="374" r="7"/>
+
+</svg>

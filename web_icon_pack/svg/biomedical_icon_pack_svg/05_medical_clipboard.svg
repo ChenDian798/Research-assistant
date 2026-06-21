@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Medical clipboard icon</title>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #111111; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+      .thin { fill: none; stroke: #111111; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+      .micro { fill: none; stroke: #111111; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .white { fill: #ffffff; }
+      .blue { fill: #1e9bef; }
+      .red { fill: #ff4a3d; }
+      .yellow { fill: #ffb21c; }
+      .gray { fill: #efefef; }
+      .black { fill: #111111; }
+    </style>
+  </defs>
+  <g id="background-ring">
+    <circle cx="64" cy="64" r="56" fill="#ffffff" stroke="#FF4234" stroke-width="6"/>
+  </g>
+  <g id="icon" transform="translate(0 0)">
+    <g id="medical-clipboard">
+      <rect x="39" y="31" width="50" height="71" rx="5" fill="#ffffff" stroke="#111111" stroke-width="4.2"/>
+      <path d="M55 30c0-6 4-10 9-10s9 4 9 10h10v14H45V30z" fill="#1e9bef" stroke="#111111" stroke-width="4" stroke-linejoin="round"/>
+      <circle cx="64" cy="28" r="3" fill="#ffffff" stroke="#111111" stroke-width="2.5"/>
+      <path d="M60 52h9v8h8v9h-8v8h-9v-8h-8v-9h8z" fill="#ff4a3d" stroke="#111111" stroke-width="3" stroke-linejoin="round"/>
+      <path class="thin" d="M52 86h24"/>
+      <path class="thin" d="M52 96h24"/>
+      <path class="thin" d="M52 76h11"/>
+    </g>
+  </g>
+</svg>

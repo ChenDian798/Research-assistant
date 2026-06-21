@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Test tube icon</title>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #111111; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+      .thin { fill: none; stroke: #111111; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+      .micro { fill: none; stroke: #111111; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .white { fill: #ffffff; }
+      .blue { fill: #1e9bef; }
+      .red { fill: #ff4a3d; }
+      .yellow { fill: #ffb21c; }
+      .gray { fill: #efefef; }
+      .black { fill: #111111; }
+    </style>
+  </defs>
+  <g id="background-ring">
+    <circle cx="64" cy="64" r="56" fill="#ffffff" stroke="#1685E8" stroke-width="6"/>
+  </g>
+  <g id="icon" transform="translate(0 0)">
+    <g id="test-tube">
+      <path class="outline white" d="M47 23h34c4 0 7 3 7 7s-3 7-7 7h-4v54c0 11-6 18-13 18s-13-7-13-18V37h-4c-4 0-7-3-7-7s3-7 7-7z"/>
+      <path d="M51 71h26v21c0 10-6 17-13 17s-13-7-13-17V71z" fill="#ff4a3d" stroke="#111111" stroke-width="3" stroke-linejoin="round"/>
+      <path class="thin" d="M52 37h24"/>
+      <path class="thin" d="M51 56h10"/>
+      <path class="thin" d="M51 68h9"/>
+      <path class="thin" d="M51 81h9"/>
+      <path class="thin" d="M76 44h-8"/>
+      <path class="thin" d="M76 62h-7"/>
+      <path class="thin" d="M76 75h-8"/>
+      <path d="M52 72c7 3 15 3 24 0" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

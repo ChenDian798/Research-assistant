@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Shooting star decorative icon</title>
+  <desc id="desc">A minimal vivid shooting star with clean curved trails.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <polygon points="330.0,116.0 345.3,153.0 385.2,156.1 354.7,182.0 364.1,220.9 330.0,200.0 295.9,220.9 305.3,182.0 274.8,156.1 314.7,153.0" class="line" stroke="#FFB000" stroke-width="3"/>
+  <g stroke-width="3.5" class="soft">
+    <path class="line" stroke="#005CFF" d="M78 302 C152 248 208 212 274 190"/>
+    <path class="line" stroke="#00B8FF" d="M130 356 C190 292 230 250 292 218"/>
+    <path class="line" stroke="#FF2A8A" d="M84 404 C148 336 190 296 252 260"/>
+  </g>
+  <path class="line" stroke="#00C6C8" stroke-width="2.5" d="M 344,316 C 354,332 354,332 370,342 C 354,352 354,352 344,368 C 334,352 334,352 318,342 C 334,332 334,332 344,316 Z"/>
+  <circle class="dot" fill="#FFB000" cx="216" cy="330" r="8"/>
+  <circle class="dot" fill="#00B8FF" cx="114" cy="224" r="7"/>
+
+</svg>

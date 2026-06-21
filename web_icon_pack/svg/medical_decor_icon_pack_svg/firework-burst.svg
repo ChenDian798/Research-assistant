@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Firework burst decorative icon</title>
+  <desc id="desc">A simplified vivid line-art firework burst for medical research web decoration.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <g stroke-width="3" class="soft">
+    <path class="line" stroke="#005CFF" d="M256 114 C250 166 250 166 256 210"/>
+    <path class="line" stroke="#00B8FF" d="M256 302 C250 354 250 354 256 398"/>
+    <path class="line" stroke="#00C6C8" d="M114 256 C166 250 166 250 210 256"/>
+    <path class="line" stroke="#00B8FF" d="M302 256 C354 250 354 250 398 256"/>
+    <path class="line" stroke="#FF2A8A" d="M154 154 C192 190 202 200 224 225"/>
+    <path class="line" stroke="#FFB000" d="M358 154 C320 190 310 200 288 225"/>
+    <path class="line" stroke="#00A856" d="M154 358 C192 322 202 312 224 287"/>
+    <path class="line" stroke="#005CFF" d="M358 358 C320 322 310 312 288 287"/>
+    <path class="line" stroke="#FF2A8A" d="M184 106 C196 142 204 166 220 194"/>
+    <path class="line" stroke="#00B8FF" d="M328 106 C316 142 308 166 292 194"/>
+    <path class="line" stroke="#00C6C8" d="M184 406 C196 370 204 346 220 318"/>
+    <path class="line" stroke="#FFB000" d="M328 406 C316 370 308 346 292 318"/>
+  </g>
+  <polygon points="256.0,218.0 266.0,242.2 292.1,244.3 272.2,261.3 278.3,286.7 256.0,273.0 233.7,286.7 239.8,261.3 219.9,244.3 246.0,242.2" class="line" stroke="#FFB000" stroke-width="2.5"/>
+  <circle class="dot" fill="#005CFF" cx="120" cy="154" r="9"/>
+  <circle class="dot" fill="#00B8FF" cx="402" cy="154" r="7"/>
+  <circle class="dot" fill="#00C6C8" cx="102" cy="318" r="7"/>
+  <circle class="dot" fill="#FF2A8A" cx="410" cy="316" r="8"/>
+  <circle class="dot" fill="#00A856" cx="256" cy="94" r="7"/>
+  <circle class="dot" fill="#FFB000" cx="256" cy="420" r="7"/>
+
+</svg>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Capsule pill icon</title>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #111111; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+      .thin { fill: none; stroke: #111111; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+      .micro { fill: none; stroke: #111111; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .white { fill: #ffffff; }
+      .blue { fill: #1e9bef; }
+      .red { fill: #ff4a3d; }
+      .yellow { fill: #ffb21c; }
+      .gray { fill: #efefef; }
+      .black { fill: #111111; }
+    </style>
+  </defs>
+  <g id="background-ring">
+    <circle cx="64" cy="64" r="56" fill="#ffffff" stroke="#1685E8" stroke-width="6"/>
+  </g>
+  <g id="icon" transform="translate(0 0)">
+    <g id="capsule-pill" transform="rotate(-45 64 64)">
+      <rect x="43" y="20" width="42" height="88" rx="21" fill="#ffffff" stroke="#111111" stroke-width="4.2"/>
+      <path d="M43 64h42v23c0 12-9 21-21 21s-21-9-21-21V64z" fill="#ff4a3d" stroke="#111111" stroke-width="4" stroke-linejoin="round"/>
+      <path class="thin" d="M43 64h42"/>
+      <circle cx="55" cy="45" r="3" fill="#111111"/>
+      <circle cx="69" cy="51" r="2.6" fill="#111111"/>
+      <circle cx="59" cy="35" r="2.2" fill="#111111"/>
+    </g>
+  </g>
+</svg>

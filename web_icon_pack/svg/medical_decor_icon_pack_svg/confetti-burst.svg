@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Confetti burst decorative icon</title>
+  <desc id="desc">A simplified upward confetti burst with saturated clean line strokes.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <g stroke-width="3" class="soft">
+    <path class="line" stroke="#00B8FF" d="M176 374 C176 318 190 270 222 214"/>
+    <path class="line" stroke="#005CFF" d="M254 390 C260 318 266 270 270 198"/>
+    <path class="line" stroke="#00C6C8" d="M336 374 C330 318 314 270 290 216"/>
+    <path class="line" stroke="#FF2A8A" d="M132 314 C162 282 178 252 190 218"/>
+    <path class="line" stroke="#005CFF" d="M380 312 C350 282 334 252 320 218"/>
+  </g>
+  <rect x="136" y="124" width="34" height="34" rx="3" class="line" stroke="#FFB000" stroke-width="2.5" transform="rotate(-24 153 141)"/>
+  <rect x="238" y="86" width="38" height="38" rx="3" class="line" stroke="#00C6C8" stroke-width="2.5" transform="rotate(-14 257 105)"/>
+  <rect x="344" y="136" width="30" height="30" rx="3" class="line" stroke="#005CFF" stroke-width="2.5" transform="rotate(34 359 151)"/>
+  <rect x="328" y="268" width="32" height="32" rx="3" class="line" stroke="#FFB000" stroke-width="2.5" transform="rotate(-32 344 284)"/>
+  <circle class="line" stroke="#FF2A8A" stroke-width="2.5" cx="192" cy="96" r="13"/>
+  <circle class="dot" fill="#00B8FF" cx="226" cy="272" r="8"/>
+  <circle class="dot" fill="#FFB000" cx="294" cy="142" r="7"/>
+  <polygon points="406.0,74.0 413.6,93.5 434.5,94.7 418.4,108.0 423.6,128.3 406.0,117.0 388.4,128.3 393.6,108.0 377.5,94.7 398.4,93.5" class="line" stroke="#005CFF" stroke-width="2"/>
+
+</svg>

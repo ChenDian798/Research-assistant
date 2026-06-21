@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Sparkle cluster decorative icon</title>
+  <desc id="desc">A restrained vivid cluster of medical-clean sparkle shapes.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <path class="line" stroke="#FFB000" stroke-width="3" d="M 228,106 C 264,162 264,162 320,198 C 264,234 264,234 228,290 C 192,234 192,234 136,198 C 192,162 192,162 228,106 Z"/>
+  <path class="line" stroke="#FF2A8A" stroke-width="3" d="M 150,264 C 172,296 172,296 204,318 C 172,340 172,340 150,372 C 128,340 128,340 96,318 C 128,296 128,296 150,264 Z"/>
+  <path class="line" stroke="#00C6C8" stroke-width="3" d="M 342,228 C 368,266 368,266 406,292 C 368,318 368,318 342,356 C 316,318 316,318 278,292 C 316,266 316,266 342,228 Z"/>
+  <path class="line" stroke="#005CFF" stroke-width="2.5" d="M 340,352 C 352,368 352,368 368,380 C 352,392 352,392 340,408 C 328,392 328,392 312,380 C 328,368 328,368 340,352 Z"/>
+  <path class="line" stroke="#00B8FF" stroke-width="2" d="M92 228 h34 M109 211 v34"/>
+  <path class="line" stroke="#005CFF" stroke-width="2" d="M410 178 h24 M422 166 v24"/>
+  <circle class="dot" fill="#FF2A8A" cx="405" cy="334" r="8"/>
+  <circle class="dot" fill="#00B8FF" cx="118" cy="386" r="7"/>
+
+</svg>

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Comet decorative icon</title>
+  <desc id="desc">A clean comet icon with saturated cyan and blue movement lines.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <circle cx="156" cy="358" r="38" class="line" stroke="#00C6C8" stroke-width="2"/>
+  <g stroke-width="2" class="soft">
+    <path class="line" stroke="#005CFF" d="M184 332 C246 252 318 182 426 102"/>
+    <path class="line" stroke="#00B8FF" d="M198 358 C280 300 342 248 430 204"/>
+    <path class="line" stroke="#00C6C8" d="M178 386 C248 352 306 324 374 300"/>
+  </g>
+  <path class="line" stroke="#00B8FF" stroke-width="3" d="M236 340 C278 288 318 248 372 210"/>
+  <circle class="dot" fill="#005CFF" cx="94" cy="402" r="8"/>
+  <circle class="dot" fill="#00C6C8" cx="316" cy="354" r="8"/>
+  <path class="line" stroke="#00C6C8" stroke-width="3" d="M 386,358 C 396,374 396,374 412,384 C 396,394 396,394 386,410 C 376,394 376,394 360,384 C 376,374 376,374 386,358 Z"/>
+
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Cloud puff decorative icon</title>
+  <desc id="desc">A calm rounded cloud puff accent with crisp medical-blue line work.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <path class="line" stroke="#005CFF" stroke-width="2" d="M130 330 C86 324 70 288 88 256 C106 224 138 218 166 232 C176 186 214 154 260 158 C306 162 334 194 342 238 C384 236 420 264 422 306 C424 350 390 380 344 380 H150 C116 380 92 360 92 330 C92 306 108 290 130 286"/>
+  <path class="line" stroke="#00B8FF" stroke-width="3.5" d="M166 232 C190 234 212 250 224 274"/>
+  <path class="line" stroke="#00C6C8" stroke-width="3.5" d="M284 380 C314 372 338 352 348 324"/>
+  <path class="line" stroke="#00B8FF" stroke-width="3" d="M108 178 L92 154 M134 164 L132 134 M390 182 L414 160 M406 220 L438 214"/>
+  <circle class="dot" fill="#00B8FF" cx="404" cy="386" r="7"/>
+
+</svg>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Airflow swirl decorative icon</title>
+  <desc id="desc">A clean blue airflow swirl icon for modern medical-themed web decoration.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <g stroke-width="2" class="soft">
+    <path class="line" stroke="#005CFF" d="M76 214 C158 190 260 188 332 226 C374 248 424 236 430 190 C436 144 386 124 354 154 C330 176 340 214 372 214"/>
+    <path class="line" stroke="#00B8FF" d="M92 284 C184 266 282 270 354 302 C392 318 430 302 430 264 C430 232 398 218 374 236 C354 250 356 280 382 282"/>
+    <path class="line" stroke="#005CFF" d="M128 350 C210 330 282 340 336 364 C366 378 394 362 394 334 C394 310 370 300 352 314 C338 326 340 350 360 350"/>
+  </g>
+  <circle class="dot" fill="#00B8FF" cx="104" cy="342" r="8"/>
+  <circle class="dot" fill="#005CFF" cx="432" cy="336" r="7"/>
+
+</svg>

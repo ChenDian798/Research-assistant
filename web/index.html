@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>文献分析助手</title>
+    <link rel="stylesheet" href="styles.css?v=notion-polish-5" />
+  </head>
+  <body>
+    <header class="app-topbar" aria-label="页面导航">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">RA</span>
+        <div>
+          <strong class="app-name">文献分析助手</strong>
+          <span class="app-subtitle">检索、添加、筛选并生成二维文献分析表</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button class="ghost-button" type="button" data-view-target="home">首页</button>
+        <button class="ghost-button" type="button" data-view-target="direct">直接添加</button>
+        <button class="ghost-button" type="button" data-view-target="search">检索流程</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section id="homeView" class="app-view is-active" data-app-view="home">
+        <div class="home-layout">
+          <div class="home-copy">
+            <p class="eyebrow">Literature Assistant</p>
+            <h1>先选择你要怎么开始</h1>
+            <p>
+              已经有论文文件或链接时，直接添加文献进入分析；还在找资料时，进入检索流程，
+              查看结果时同步挑选文献，添加后确认清单，最后生成二维文献分析表。
+            </p>
+          </div>
+
+          <div class="choice-grid" aria-label="开始方式">
+            <article class="choice-card">
+              <div>
+                <div class="tag-row">
+                  <span class="tag tag-accent">最快路径</span>
+                  <span class="tag">PDF / DOCX / DOI / 链接</span>
+                </div>
+                <h2>直接添加文献分析</h2>
+                <p>上传 PDF/DOCX，或粘贴 DOI、arXiv、PubMed、论文页面链接，直接进入综合分析。</p>
+              </div>
+              <button class="primary-button" type="button" data-view-target="direct">添加文献</button>
+            </article>
+
+            <article class="choice-card">
+              <div>
+                <div class="tag-row">
+                  <span class="tag tag-blue">分步流程</span>
+                  <span class="tag">检索 / 查看并挑选 / 确认清单 / 分析</span>
+                </div>
+                <h2>进入检索流程</h2>
+                <p>输入研究主题和来源，查看候选结果，勾选要进入最终二维表格分析的文献。</p>
+              </div>
+              <button class="primary-button blue" type="button" data-view-target="search">开始检索</button>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <form id="literatureForm" class="analysis-flow">
+        <section id="directView" class="app-view" data-app-view="direct">
+          <div class="view-header">
+            <div>
+              <p class="eyebrow">Direct Analysis</p>
+              <h1>直接添加文献分析</h1>
+              <p class="view-lead">这个入口只服务“我已经有文件或链接，直接分析”的任务，不展示检索结果池。</p>
+            </div>
+            <span id="literatureStatus" class="analysis-status" role="status" aria-live="polite">等待输入</span>
+          </div>
+
+          <div class="direct-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>添加文献</h2>
+                  <p>文件上传和链接输入并列，用户可以任选一种，也可以混合使用。</p>
+                </div>
+              </div>
+              <div class="panel-body direct-input-grid">
+                <section class="direct-input-card">
+                  <h3>上传 PDF / DOCX</h3>
+                  <p>支持多篇文献。非文献材料会作为写作要求、背景约束或辅助材料处理。</p>
+                  <label class="pdf-upload-box" for="pdfInput">
+                    <strong>选择或拖放文件</strong>
+                    <span>PDF / DOCX，最多 4 个文件，总大小 30MB</span>
+                  </label>
+                  <input id="pdfInput" type="file" accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx" multiple />
+                </section>
+
+                <section class="direct-input-card">
+                  <h3>粘贴 DOI / arXiv / 论文链接</h3>
+                  <p>每行一个标识符或链接。系统会优先补全文献元数据和摘要。</p>
+                  <textarea id="doiInput" rows="9" placeholder="10.1038/s41586-024-xxxxx&#10;https://arxiv.org/abs/2501.00001&#10;https://pubmed.ncbi.nlm.nih.gov/12345678/"></textarea>
+                </section>
+              </div>
+            </section>
+
+            <aside class="panel side-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>待分析内容</h2>
+                  <p>添加完成后直接开始综合分析。</p>
+                </div>
+              </div>
+              <div class="panel-body">
+                <div class="input-summary-stack">
+                  <div class="file-summary-box">
+                    <strong>文件</strong>
+                    <span id="pdfFileSummary" class="empty-state">尚未选择文件。</span>
+                  </div>
+                  <div class="file-summary-box">
+                    <strong>链接 / 标识符</strong>
+                    <span id="linkInputSummary" class="empty-state">尚未添加链接或文字说明。</span>
+                  </div>
+                </div>
+                <div class="button-stack">
+                  <button id="doiAnalyzeButton" class="primary-button" type="submit">开始综合分析</button>
+                  <button id="clearPdfButton" class="ghost-button full" type="button" disabled>清空文件</button>
+                </div>
+                <p class="helper-text">提交后会进入统一分析任务；完成后展示跨文献总结、二维表格和导出按钮。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="searchView" class="app-view" data-app-view="search">
+          <div class="view-header">
+            <div>
+              <p class="eyebrow">Search Flow</p>
+              <h1>检索流程</h1>
+            <p class="view-lead">按步骤完成：检索、查看结果并挑选、确认清单、开始分析。</p>
+            </div>
+            <span id="literatureSearchStatus" class="analysis-status" role="status" aria-live="polite">等待检索</span>
+          </div>
+
+          <nav class="stepper" aria-label="检索流程步骤">
+            <button class="step is-active" type="button" data-search-step-target="1">
+              <span class="step-number">1</span>
+              <span><strong>检索</strong><small>输入主题和来源</small></span>
+            </button>
+            <button class="step" type="button" data-search-step-target="2">
+              <span class="step-number">2</span>
+              <span><strong>查看并挑选</strong><small>勾选后点击添加</small></span>
+            </button>
+            <button class="step" type="button" data-search-step-target="3">
+              <span class="step-number">3</span>
+              <span><strong>确认清单</strong><small>检查最终文献</small></span>
+            </button>
+            <button class="step" type="button" data-search-step-target="4">
+              <span class="step-number">4</span>
+              <span><strong>开始分析</strong><small>生成二维表格</small></span>
+            </button>
+          </nav>
+
+          <section class="panel flow-step is-active" data-search-step="1">
+            <div class="panel-header">
+              <div>
+                <h2>第 1 步：检索文献</h2>
+                <p>只填写检索需要的信息，不展示候选池和结果表。</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="search-grid">
+                <label class="search-field search-field-wide">
+                  <span>研究主题 / 检索式</span>
+                  <textarea id="literatureSearchQuery" rows="4" placeholder="low-resource medical image segmentation foundation model"></textarea>
+                </label>
+                <label class="search-field">
+                  <span>年份范围</span>
+                  <input id="literatureSearchYear" type="text" placeholder="2022-2026" />
+                </label>
+                <label class="search-field">
+                  <span>每源数量</span>
+                  <input id="literatureSearchLimit" type="number" min="1" max="50" value="5" />
+                </label>
+              </div>
+              <fieldset class="source-options">
+                <legend>来源</legend>
+                <label><input type="checkbox" name="paperSource" value="arxiv" checked /> arXiv</label>
+                <label><input type="checkbox" name="paperSource" value="pubmed" checked /> PubMed</label>
+                <label><input type="checkbox" name="paperSource" value="semantic" /> Semantic Scholar</label>
+                <label><input type="checkbox" name="paperSource" value="crossref" /> Crossref</label>
+                <label><input type="checkbox" name="paperSource" value="openalex" /> OpenAlex</label>
+                <label><input type="checkbox" name="paperSource" value="cnki" /> 知网 CNKI</label>
+              </fieldset>
+              <div class="advanced-options">
+                <label><input id="includeNeedsReviewSearch" type="checkbox" checked /> 显示待复核候选</label>
+                <label><input id="appendAnnotationRecordSearch" type="checkbox" checked /> 写入检索标注记录</label>
+              </div>
+              <div class="form-actions">
+                <button id="literatureSearchButton" class="primary-button" type="button">检索文献</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="searchCandidatePanel" class="panel flow-step is-hidden" data-search-step="2" aria-live="polite">
+            <div class="panel-header candidate-panel-heading">
+              <div>
+                <h2>第 2 步：查看结果并挑选文献</h2>
+                <p id="searchCandidateMeta" class="candidate-meta"></p>
+              </div>
+              <button id="addSearchReferencesButton" class="primary-button" type="button" disabled>添加到确认清单</button>
+            </div>
+            <div class="panel-body">
+              <div id="searchCandidateList" class="candidate-list">
+                <div class="candidate-empty">检索完成后，候选结果会显示在这里。勾选需要的文献后点击“添加到确认清单”。</div>
+              </div>
+              <div class="form-actions">
+                <button class="ghost-button" type="button" data-search-step-target="1">返回检索</button>
+                <button class="primary-button" type="button" data-search-step-target="3">确认清单</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel flow-step" data-search-step="3">
+            <div class="panel-header">
+              <div>
+                <h2>第 3 步：确认清单</h2>
+                <p>这里是最终二维表格的输入清单，请确认后再开始分析。</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div id="stagedReferenceList" class="staged-reference-list empty-selection">
+                <strong>尚未加入文献</strong>
+                <p>请返回第 2 步，在检索结果中勾选文献并点击添加。</p>
+              </div>
+              <div class="form-actions">
+                <button class="ghost-button" type="button" data-search-step-target="2">返回结果</button>
+                <button class="primary-button" type="button" data-search-step-target="4">下一步：开始分析</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel flow-step" data-search-step="4">
+            <div class="panel-header">
+              <div>
+                <h2>第 4 步：开始分析</h2>
+                <p>开始后将生成跨文献总结和二维文献分析表。</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="empty-state-box">
+                <strong>准备生成二维表格文献分析</strong>
+                <span>确认最终清单无误后，点击开始综合分析。</span>
+              </div>
+              <div class="form-actions">
+                <button class="ghost-button" type="button" data-search-step-target="3">返回清单</button>
+                <button id="searchAnalyzeButton" class="primary-button" type="submit">开始综合分析</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="resultsView" class="app-view" data-app-view="results">
+          <div class="view-header">
+            <div>
+              <p class="eyebrow">Analysis Result</p>
+              <h1>文献分析结果</h1>
+              <p class="view-lead">分析完成后展示跨文献总结、二维表格和导出操作。</p>
+            </div>
+            <div class="result-actions">
+              <label id="literatureExportFormatWrap" class="inline-export-select is-hidden">
+                <span>格式</span>
+                <select id="literatureExportFormat" disabled>
+                  <option value="md" selected>MD</option>
+                  <option value="txt">TXT</option>
+                  <option value="pdf">PDF</option>
+                </select>
+              </label>
+              <button id="literatureExportButton" class="primary-button is-hidden" type="button" disabled>导出</button>
+            </div>
+          </div>
+
+          <section class="panel">
+            <section id="doiSummary" class="literature-summary is-empty" aria-live="polite"></section>
+            <div
+              class="split-resizer"
+              data-resize-target="doiSummary"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="调整文献总结区域高度"
+              tabindex="0"
+            ></div>
+            <div class="analysis-table-scroll">
+              <table class="analysis-table doi-table">
+                <thead>
+                  <tr>
+                    <th>文献/来源</th>
+                    <th>核心贡献</th>
+                    <th>方法/证据</th>
+                    <th>证据强度</th>
+                    <th>创新点</th>
+                    <th>主要局限</th>
+                    <th>文献定位</th>
+                    <th>后续建议</th>
+                  </tr>
+                </thead>
+                <tbody id="doiAnalysisBody">
+                  <tr><td colspan="8" class="empty-state">提交文献后会在这里生成分析表。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </form>
+    </main>
+
+    <script src="app.js?v=flow-redesign-4"></script>
+  </body>
+</html>

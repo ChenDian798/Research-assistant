@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Brain and neuron icon</title>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #111111; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+      .thin { fill: none; stroke: #111111; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+      .micro { fill: none; stroke: #111111; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .white { fill: #ffffff; }
+      .blue { fill: #1e9bef; }
+      .red { fill: #ff4a3d; }
+      .yellow { fill: #ffb21c; }
+      .gray { fill: #efefef; }
+      .black { fill: #111111; }
+    </style>
+  </defs>
+  <g id="background-ring">
+    <circle cx="64" cy="64" r="56" fill="#ffffff" stroke="#FFAB13" stroke-width="6"/>
+  </g>
+  <g id="icon" transform="translate(0 0)">
+    <g id="brain-neuron">
+      <path d="M55 31c-9-2-17 4-18 13-7 2-11 9-9 17-6 5-5 16 2 21-2 9 7 18 17 16 4 6 15 7 21 2 7 5 18 2 21-7 8-1 13-8 12-16 8-6 7-18-1-23 2-10-6-20-17-19-5-8-18-10-28-4z" fill="#efefef" stroke="#111111" stroke-width="4" stroke-linejoin="round"/>
+      <path class="thin" d="M58 32c-7 7-7 17 0 25"/>
+      <path class="thin" d="M43 46c9-1 16 3 18 12"/>
+      <path class="thin" d="M40 64c7 2 11 8 10 16"/>
+      <path class="thin" d="M58 79c-3 6-2 13 5 19"/>
+      <path class="thin" d="M76 38c5 6 6 13 2 21"/>
+      <path class="thin" d="M76 66c7 4 10 11 8 19"/>
+      <g id="neuron" transform="translate(2 0)">
+        <circle cx="89" cy="56" r="8" fill="#ffb21c" stroke="#111111" stroke-width="3"/>
+        <path class="thin" d="M89 48v-13"/>
+        <path class="thin" d="M89 64v15"/>
+        <path class="thin" d="M82 52l-12-9"/>
+        <path class="thin" d="M96 52l12-9"/>
+        <path class="thin" d="M82 61l-13 12"/>
+        <path class="thin" d="M96 61l12 11"/>
+        <path class="thin" d="M89 79c-2 9-11 15-21 17"/>
+        <circle cx="88" cy="56" r="2.4" fill="#111111"/>
+      </g>
+    </g>
+  </g>
+</svg>

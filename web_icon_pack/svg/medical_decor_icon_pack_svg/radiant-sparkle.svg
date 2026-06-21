@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" fill="none">
+  <title id="title">Radiant sparkle decorative icon</title>
+  <desc id="desc">A vivid but restrained radiant sparkle line icon for webpage ornament.</desc>
+  <style>
+  .line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .dot { stroke: none; }
+  .soft { opacity: 1; }
+</style>
+
+  <path class="line" stroke="#FFB000" stroke-width="3.5" d="M 256,186 C 284,228 284,228 326,256 C 284,284 284,284 256,326 C 228,284 228,284 186,256 C 228,228 228,228 256,186 Z"/>
+  <g stroke-width="3" class="soft">
+    <path class="line" stroke="#FFB000" d="M256 78 V132"/>
+    <path class="line" stroke="#FF2A8A" d="M256 380 V434"/>
+    <path class="line" stroke="#FFB000" d="M78 256 H132"/>
+    <path class="line" stroke="#00B8FF" d="M380 256 H434"/>
+    <path class="line" stroke="#FF2A8A" d="M132 132 L166 166"/>
+    <path class="line" stroke="#005CFF" d="M346 346 L380 380"/>
+    <path class="line" stroke="#005CFF" d="M132 380 L166 346"/>
+    <path class="line" stroke="#FF2A8A" d="M346 166 L380 132"/>
+  </g>
+  <circle class="line" stroke="#FF2A8A" stroke-width="2.5" cx="132" cy="220" r="12"/>
+  <circle class="dot" fill="#00B8FF" cx="392" cy="306" r="8"/>
+  <circle class="dot" fill="#FFB000" cx="354" cy="96" r="7"/>
+
+</svg>
