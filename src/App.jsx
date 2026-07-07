@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Topbar from "./components/Topbar.jsx";
 import HomeView from "./views/HomeView.jsx";
 import DirectAnalysisView from "./views/DirectAnalysisView.jsx";
+import StandaloneSearchView from "./views/StandaloneSearchView.jsx";
+import NoveltyCheckView from "./views/NoveltyCheckView.jsx";
 import SearchFlowView from "./views/SearchFlowView.jsx";
 import ResultsView from "./views/ResultsView.jsx";
 import HistoryView from "./views/HistoryView.jsx";
@@ -29,54 +31,23 @@ import {
   submitCombinedLiteratureAnalysis,
   submitLinkLiteratureAnalysis,
   submitLiteratureSearchRequest,
+  submitNoveltyCheckRequest,
   waitForJob,
 } from "./lib/api.js";
 import { exportAnalysisDocument } from "./lib/export.js";
 import { createTranslator, getInitialLanguage, saveLanguage } from "./lib/i18n.js";
-
-const allowedViews = ["home", "direct", "search", "results", "history"];
-const legacyViewMap = { literature: "home" };
-
-function viewFromHash() {
-  const value = window.location.hash.replace("#", "");
-  return legacyViewMap[value] || (allowedViews.includes(value) ? value : "home");
-}
-
-function historySearchCandidates(entry) {
-  const result = entry?.result || {};
-  const qualified = Array.isArray(result.qualified_references) ? result.qualified_references : [];
-  const needsReview = Array.isArray(result.needs_review_references) ? result.needs_review_references : [];
-  return [...qualified, ...needsReview].map((reference, index) => ({
-    ...reference,
-    candidate_group: index < qualified.length ? "qualified" : "needs_review",
-    candidate_id: reference.dedupe_key || reference.source || reference.doi || reference.title || `candidate-${index}`,
-  }));
-}
-
-function hasStoredAnalysisResult(entry) {
-  const result = entry?.result || {};
-  const rows = Array.isArray(result.rows) ? result.rows : [];
-  const reviewNeededDocuments = Array.isArray(entry?.request?.review_needed_documents)
-    ? entry.request.review_needed_documents
-    : [];
-  return Boolean(rows.length || normalizeLiteratureSummary(result.summary) || reviewNeededDocuments.length);
-}
-
-function storedAnalysisResult(entry, fallbackTopic = "literature-analysis") {
-  const request = entry?.request || {};
-  const result = entry?.result || {};
-  const rows = Array.isArray(result.rows) ? result.rows : [];
-  const references = Array.isArray(result.references) ? result.references : [];
-  const requestReferences = Array.isArray(request.references) ? request.references : [];
-  const reviewNeededDocuments = Array.isArray(request.review_needed_documents) ? request.review_needed_documents : [];
-  return {
-    rows,
-    summary: normalizeLiteratureSummary(result.summary),
-    topic: request.topic || fallbackTopic,
-    displayReferences: references.length ? references : requestReferences,
-    reviewNeededDocuments,
-  };
-}
+import {
+  allowedViews,
+  defaultNoveltyForm,
+  defaultSearchForm,
+  hasStoredAnalysisResult,
+  historySearchCandidates,
+  isActiveHistoryEntry,
+  isHistorySummaryOnly,
+  mergeHistorySummaryIntoDetail,
+  storedAnalysisResult,
+  viewFromHash,
+} from "./lib/appState.js";
 
 export default function App() {
   const [language, setLanguage] = useState(getInitialLanguage);
@@ -98,16 +69,10 @@ export default function App() {
   });
   const analysisRunIds = useRef({ direct: 0, search: 0 });
   const searchRunId = useRef(0);
+  const standaloneSearchRunId = useRef(0);
+  const noveltyRunId = useRef(0);
 
-  const [searchForm, setSearchForm] = useState({
-    query: "",
-    searchMode: "auto",
-    year: "",
-    limit: "5",
-    sources: ["arxiv", "pubmed"],
-    includeNeedsReview: true,
-    appendAnnotationRecord: true,
-  });
+  const [searchForm, setSearchForm] = useState(defaultSearchForm);
   const [searchLoading, setSearchLoading] = useState(false);
   const [candidatePayload, setCandidatePayload] = useState({ rejected_count: 0, errors: {} });
   const [searchCandidateReferences, setSearchCandidateReferences] = useState([]);
@@ -116,12 +81,31 @@ export default function App() {
   const [activeSearchHistoryId, setActiveSearchHistoryId] = useState("");
   const [searchAnalysisQueued, setSearchAnalysisQueued] = useState(false);
   const [hasSearchResult, setHasSearchResult] = useState(false);
+  const [standaloneSearchForm, setStandaloneSearchForm] = useState(defaultSearchForm);
+  const [standaloneSearchStatus, setStandaloneSearchStatus] = useState("");
+  const [standaloneSearchStatusError, setStandaloneSearchStatusError] = useState(false);
+  const [standaloneSearchLoading, setStandaloneSearchLoading] = useState(false);
+  const [standaloneCandidatePayload, setStandaloneCandidatePayload] = useState({ rejected_count: 0, errors: {} });
+  const [standaloneSearchCandidateReferences, setStandaloneSearchCandidateReferences] = useState([]);
+  const [standaloneSelectedCandidateIds, setStandaloneSelectedCandidateIds] = useState(new Set());
+  const [standaloneActiveSearchHistoryId, setStandaloneActiveSearchHistoryId] = useState("");
+  const [standaloneHasSearchResult, setStandaloneHasSearchResult] = useState(false);
+  const [noveltyForm, setNoveltyForm] = useState(defaultNoveltyForm);
+  const [noveltyStatus, setNoveltyStatus] = useState("");
+  const [noveltyStatusError, setNoveltyStatusError] = useState(false);
+  const [noveltyRunning, setNoveltyRunning] = useState(false);
+  const [noveltyResult, setNoveltyResult] = useState(null);
+  const [noveltyActiveHistoryId, setNoveltyActiveHistoryId] = useState("");
   const [exportFormat, setExportFormat] = useState("md");
   const [historyEntries, setHistoryEntries] = useState([]);
   const [selectedHistoryEntry, setSelectedHistoryEntry] = useState(null);
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const selectedHistoryIdRef = useRef("");
+  const selectedHistoryEntryRef = useRef(null);
+  const historyListRunId = useRef(0);
+  const historyDetailRunId = useRef(0);
   const t = useMemo(() => createTranslator(language), [language]);
 
   useEffect(() => {
@@ -147,47 +131,88 @@ export default function App() {
     setSearchStep(Number(step) || 1);
   };
 
-  const loadHistory = async (selectId = "") => {
-    setHistoryLoading(true);
+  useEffect(() => {
+    selectedHistoryIdRef.current = selectedHistoryId;
+  }, [selectedHistoryId]);
+
+  useEffect(() => {
+    selectedHistoryEntryRef.current = selectedHistoryEntry;
+  }, [selectedHistoryEntry]);
+
+  const loadHistoryEntryDetail = async (historyId, options = {}) => {
+    if (!historyId) return;
+    const runId = ++historyDetailRunId.current;
+    if (options.summary) {
+      setSelectedHistoryEntry((entry) => (entry?.id === historyId && !isHistorySummaryOnly(entry) ? entry : options.summary));
+    }
+    if (options.loading !== false) setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const entry = await fetchHistoryEntry(historyId);
+      if (runId !== historyDetailRunId.current) return;
+      selectedHistoryEntryRef.current = entry;
+      setSelectedHistoryEntry(entry);
+      setSelectedHistoryId(entry.id);
+      selectedHistoryIdRef.current = entry.id;
+    } catch (error) {
+      if (runId === historyDetailRunId.current) setHistoryError(error.message);
+    } finally {
+      if (runId === historyDetailRunId.current && options.loading !== false) setHistoryLoading(false);
+    }
+  };
+
+  const loadHistory = async (selectId = "", options = {}) => {
+    const runId = ++historyListRunId.current;
+    if (options.loading !== false) setHistoryLoading(true);
     setHistoryError("");
     try {
       const entries = await fetchHistoryEntries();
+      if (runId !== historyListRunId.current) return;
+      const targetId = selectId || selectedHistoryIdRef.current || entries[0]?.id || "";
+      const targetSummary = entries.find((entry) => entry.id === targetId) || null;
       setHistoryEntries(entries);
-      const targetId = selectId || selectedHistoryId || entries[0]?.id || "";
       if (targetId) {
-        const entry = await fetchHistoryEntry(targetId);
-        setSelectedHistoryEntry(entry);
-        setSelectedHistoryId(entry.id);
+        const currentDetail = selectedHistoryEntryRef.current;
+        const shouldFetchDetail = Boolean(
+          options.forceDetail ||
+          selectId ||
+          !currentDetail ||
+          currentDetail.id !== targetId ||
+          isHistorySummaryOnly(currentDetail) ||
+          isActiveHistoryEntry(currentDetail) ||
+          isActiveHistoryEntry(targetSummary),
+        );
+        setSelectedHistoryId(targetId);
+        selectedHistoryIdRef.current = targetId;
+        if (shouldFetchDetail) {
+          loadHistoryEntryDetail(targetId, { summary: targetSummary, loading: options.loading !== false });
+        } else if (targetSummary) {
+          setSelectedHistoryEntry((entry) => mergeHistorySummaryIntoDetail(entry, targetSummary));
+        }
       } else {
         setSelectedHistoryEntry(null);
         setSelectedHistoryId("");
       }
     } catch (error) {
-      setHistoryError(error.message);
+      if (runId === historyListRunId.current) setHistoryError(error.message);
     } finally {
-      setHistoryLoading(false);
+      if (runId === historyListRunId.current && options.loading !== false) setHistoryLoading(false);
     }
   };
 
   useEffect(() => {
     if (currentView !== "history") return undefined;
-    loadHistory();
-    const timer = window.setInterval(() => loadHistory(), 3000);
+    loadHistory("", { forceDetail: true });
+    const timer = window.setInterval(() => loadHistory(), 5000);
     return () => window.clearInterval(timer);
-  }, [currentView, selectedHistoryId]);
+  }, [currentView]);
 
   const handleSelectHistoryEntry = async (historyId) => {
+    if (!historyId) return;
+    selectedHistoryIdRef.current = historyId;
+    const summary = historyEntries.find((entry) => entry.id === historyId) || null;
     setSelectedHistoryId(historyId);
-    setHistoryLoading(true);
-    setHistoryError("");
-    try {
-      const entry = await fetchHistoryEntry(historyId);
-      setSelectedHistoryEntry(entry);
-    } catch (error) {
-      setHistoryError(error.message);
-    } finally {
-      setHistoryLoading(false);
-    }
+    loadHistoryEntryDetail(historyId, { summary });
   };
 
   const handleDeleteHistoryEntry = async (entry) => {
@@ -240,10 +265,31 @@ export default function App() {
       entry = await resolveSearchHistoryEntry(entry);
     }
     const request = entry?.request || {};
+    if (entry?.kind === "novelty_check") {
+      setNoveltyForm((current) => ({
+        ...current,
+        innovationText: request.innovation_text || entry.title || "",
+        searchMode: request.search_mode || current.searchMode || "auto",
+        year: request.year || "",
+        sources: String(request.sources || "")
+          .split(",")
+          .map((source) => source.trim())
+          .filter(Boolean),
+        includeFilteredReferences: Boolean(request.include_filtered_references),
+      }));
+      setNoveltyRunning(false);
+      setNoveltyResult(entry.result && Object.keys(entry.result).length ? entry.result : null);
+      setNoveltyActiveHistoryId(entry.id || "");
+      setNoveltyStatus(t("history.resubmitNoveltyLoaded"));
+      setNoveltyStatusError(false);
+      navigate("novelty");
+      return;
+    }
+
     if (entry?.kind === "literature_search" || entry?.kind === "search_flow") {
       const result = entry?.result || {};
       const references = historySearchCandidates(entry);
-      setSearchForm((current) => ({
+      setStandaloneSearchForm((current) => ({
         ...current,
         query: request.query || result.query || entry.title || "",
         searchMode: request.search_mode || result.search_mode || current.searchMode || "auto",
@@ -255,27 +301,19 @@ export default function App() {
           .filter(Boolean),
         includeNeedsReview: request.include_needs_review !== false,
       }));
-      setSearchLoading(false);
-      setSearchCandidateReferences(references);
-      setSelectedCandidateIds(new Set(references
-        .filter((reference) => reference.candidate_group !== "needs_review")
+      setStandaloneSearchLoading(false);
+      setStandaloneSearchCandidateReferences(references);
+      setStandaloneSelectedCandidateIds(new Set(references
+        .filter((reference) => reference.candidate_group === "qualified")
         .map((reference) => reference.candidate_id)));
-      setStagedAnalysisReferences([]);
-      setCandidatePayload(references.length ? result : { rejected_count: 0, errors: {} });
-      setHasSearchResult(Boolean(references.length || entry?.status === "done" || entry?.stage === "Search complete"));
-      setActiveSearchHistoryId(entry.id || "");
-      setActiveAnalysisSource("search");
-      setAnalysisMode("idle");
-      setAnalysisError("");
-      setAnalysisRunning((current) => ({ ...current, search: false }));
-      updateResult("search", createEmptyAnalysisResult());
-      setSearchStatus(references.length || entry?.status === "done" || entry?.stage === "Search complete"
+      setStandaloneCandidatePayload(references.length ? result : { rejected_count: 0, errors: {} });
+      setStandaloneHasSearchResult(Boolean(references.length || entry?.status === "done" || entry?.stage === "Search complete"));
+      setStandaloneActiveSearchHistoryId(entry.id || "");
+      setStandaloneSearchStatus(references.length || entry?.status === "done" || entry?.stage === "Search complete"
         ? t("history.continueSearchLoaded", { count: references.length })
         : t("history.resubmitSearchLoaded"));
-      setSearchStatusError(false);
-      setSearchAnalysisQueued(false);
-      setSearchStep(references.length || entry?.status === "done" || entry?.stage === "Search complete" ? 2 : 1);
-      navigate("search");
+      setStandaloneSearchStatusError(false);
+      navigate("standaloneSearch");
       return;
     }
 
@@ -345,7 +383,7 @@ export default function App() {
       }));
       setSearchCandidateReferences(references);
       setSelectedCandidateIds(new Set(references
-        .filter((reference) => reference.candidate_group !== "needs_review")
+        .filter((reference) => reference.candidate_group === "qualified")
         .map((reference) => reference.candidate_id)));
       setStagedAnalysisReferences([]);
       setCandidatePayload(result);
@@ -418,17 +456,24 @@ export default function App() {
     searchAnalysisResult.reviewNeededDocuments.length
   );
   const candidateMeta = useMemo(() => {
-    const rejectedCount = Number(candidatePayload.rejected_count || 0);
-    const errors = candidatePayload.errors || {};
+    return buildSearchCandidateMeta(candidatePayload, searchCandidateReferences.length);
+  }, [candidatePayload, searchCandidateReferences.length, t]);
+  const standaloneCandidateMeta = useMemo(() => {
+    return buildSearchCandidateMeta(standaloneCandidatePayload, standaloneSearchCandidateReferences.length);
+  }, [standaloneCandidatePayload, standaloneSearchCandidateReferences.length, t]);
+
+  function buildSearchCandidateMeta(payload, count) {
+    const rejectedCount = Number(payload.rejected_count || 0);
+    const errors = payload.errors || {};
     const errorText = Object.entries(errors).map(([source, message]) => `${source}: ${message}`).join("；");
-    const mode = candidatePayload.search_mode || candidatePayload.requested_search_mode || "";
+    const mode = payload.search_mode || payload.requested_search_mode || "";
     return [
-      t("candidate.meta", { count: searchCandidateReferences.length }),
+      t("candidate.meta", { count }),
       mode ? t("candidate.searchMode", { mode: t(`search.mode.${mode}`) }) : "",
       rejectedCount ? t("candidate.rejected", { count: rejectedCount }) : "",
       errorText ? t("candidate.sourceHint", { text: errorText }) : "",
     ].filter(Boolean).join(" · ");
-  }, [candidatePayload, searchCandidateReferences.length, t]);
+  }
 
   function updateResult(source, result) {
     setAnalysisResultsBySource((current) => ({ ...current, [source]: result }));
@@ -502,14 +547,18 @@ export default function App() {
     }
 
     if (source === "search") {
+      const runId = ++analysisRunIds.current.search;
       setStatus(t("status.queueingSearchAnalysis"));
       setStatusError(false);
       setSearchAnalysisQueued(false);
       setActiveAnalysisSource("search");
+      setAnalysisMode("loading");
+      setAnalysisError("");
+      updateResult("search", { ...createEmptyAnalysisResult(request.topic), displayReferences: request.previewReferences });
       setAnalysisRunning((current) => ({ ...current, search: true }));
       try {
-        const response = await submitLinkLiteratureAnalysis(request.references, request.userContext, request.topic, source, activeSearchHistoryId);
-        const payload = await readJsonResponse(response);
+        const response = await submitLinkLiteratureAnalysis(request.references, request.userContext, request.topic, source, activeSearchHistoryId, language);
+        let payload = await readJsonResponse(response);
         if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
         loadHistory(payload.history_id);
         setActiveSearchHistoryId(payload.history_id || activeSearchHistoryId);
@@ -518,12 +567,46 @@ export default function App() {
         setSearchStatusError(false);
         setSearchStep(4);
         navigate("search");
-      } catch (error) {
+        if (payload.job_id) {
+          payload = await waitForJob("/api/literature-analysis", payload.job_id, (message) => {
+            if (analysisRunIds.current.search === runId) setSearchStatus(message);
+          }, t);
+        }
+        if (analysisRunIds.current.search !== runId) return;
+
+        const rows = Array.isArray(payload.rows) ? payload.rows : [];
+        const summary = normalizeLiteratureSummary(payload.summary);
+        const references = Array.isArray(payload.references) && payload.references.length
+          ? payload.references
+          : request.previewReferences;
+        const reviewNeededDocuments = Array.isArray(payload.review_needed_documents) ? payload.review_needed_documents : [];
+        updateResult("search", {
+          rows,
+          summary,
+          topic: request.topic,
+          displayReferences: references,
+          reviewNeededDocuments,
+        });
+        setAnalysisMode("done");
+        setExportFormat(rows.length ? "md" : "txt");
         setSearchAnalysisQueued(false);
+        setSearchStatus(reviewNeededDocuments.length
+          ? t("status.analysisCompleteWithReview", { count: rows.length, reviewCount: reviewNeededDocuments.length })
+          : t("status.analysisComplete", { count: rows.length }));
+        setSearchStatusError(false);
+        loadHistory(payload.history_id || activeSearchHistoryId);
+      } catch (error) {
+        if (analysisRunIds.current.search !== runId) return;
+        setSearchAnalysisQueued(false);
+        setAnalysisMode("error");
+        setAnalysisError(error.message);
+        updateResult("search", { ...createEmptyAnalysisResult(request.topic), displayReferences: request.previewReferences });
         setSearchStatus(`${t("status.searchAnalysisFailed")} - ${error.message}`);
         setSearchStatusError(true);
       } finally {
-        setAnalysisRunning((current) => ({ ...current, search: false }));
+        if (analysisRunIds.current.search === runId) {
+          setAnalysisRunning((current) => ({ ...current, search: false }));
+        }
       }
       return;
     }
@@ -548,8 +631,8 @@ export default function App() {
 
     try {
       const response = request.pdfFiles.length
-        ? await submitCombinedLiteratureAnalysis(request.references, request.pdfFiles, request.userContext, request.topic, source)
-        : await submitLinkLiteratureAnalysis(request.references, request.userContext, request.topic, source);
+        ? await submitCombinedLiteratureAnalysis(request.references, request.pdfFiles, request.userContext, request.topic, source, language)
+        : await submitLinkLiteratureAnalysis(request.references, request.userContext, request.topic, source, "", language);
       let payload = await readJsonResponse(response);
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
       const acceptedReferences = Array.isArray(payload.references) ? payload.references : [];
@@ -587,7 +670,7 @@ export default function App() {
       updateResult(source, { ...createEmptyAnalysisResult(request.topic), displayReferences: request.previewReferences });
       setAnalysisMode("error");
       setAnalysisError(error.message);
-      setStatus(source === "search" ? t("status.searchAnalysisFailed") : t("status.directAnalysisFailed"));
+      setStatus(`${source === "search" ? t("status.searchAnalysisFailed") : t("status.directAnalysisFailed")} - ${error.message}`);
       setStatusError(true);
     } finally {
       if (analysisRunIds.current[source] === runId) {
@@ -609,23 +692,36 @@ export default function App() {
     }));
   }
 
+  function handleStandaloneSearchFormChange(field, value) {
+    setStandaloneSearchForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function handleStandaloneToggleSource(value, checked) {
+    setStandaloneSearchForm((current) => ({
+      ...current,
+      sources: checked
+        ? [...current.sources, value]
+        : current.sources.filter((source) => source !== value),
+    }));
+  }
+
+  function handleNoveltyFormChange(field, value) {
+    setNoveltyForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function handleNoveltyToggleSource(value, checked) {
+    setNoveltyForm((current) => ({
+      ...current,
+      sources: checked
+        ? [...current.sources, value]
+        : current.sources.filter((source) => source !== value),
+    }));
+  }
+
   function applySearchResultPayload(payload) {
-    const qualified = (payload.qualified_references || []).map((reference) => ({
-      ...reference,
-      candidate_group: "qualified",
-    }));
-    const needsReview = (payload.needs_review_references || []).map((reference) => ({
-      ...reference,
-      candidate_group: "needs_review",
-    }));
-    const references = [...qualified, ...needsReview].map((reference, index) => ({
-      ...reference,
-      candidate_id: reference.dedupe_key || reference.source || reference.doi || reference.title || `candidate-${index}`,
-    }));
+    const { references, selectedIds, qualified, needsReview } = normalizeSearchResultPayload(payload);
     setSearchCandidateReferences(references);
-    setSelectedCandidateIds(new Set(qualified.map((reference, index) => (
-      reference.dedupe_key || reference.source || reference.doi || reference.title || `candidate-${index}`
-    ))));
+    setSelectedCandidateIds(selectedIds);
     setCandidatePayload(payload);
     setHasSearchResult(true);
     setSearchStatus(t("status.searchComplete", {
@@ -638,19 +734,66 @@ export default function App() {
     setActiveSearchHistoryId(payload.history_id || "");
   }
 
-  async function submitLiteratureSearch() {
+  function applyStandaloneSearchResultPayload(payload) {
+    const { references, selectedIds, qualified, needsReview } = normalizeSearchResultPayload(payload);
+    setStandaloneSearchCandidateReferences(references);
+    setStandaloneSelectedCandidateIds(selectedIds);
+    setStandaloneCandidatePayload(payload);
+    setStandaloneHasSearchResult(true);
+    setStandaloneSearchStatus(t("status.searchComplete", {
+      qualified: qualified.length,
+      needsReview: needsReview.length,
+      rejected: payload.rejected_count || 0,
+    }));
+    setStandaloneSearchStatusError(false);
+    loadHistory(payload.history_id);
+    setStandaloneActiveSearchHistoryId(payload.history_id || "");
+  }
+
+  function normalizeSearchResultPayload(payload) {
+    const qualified = (payload.qualified_references || []).map((reference) => ({
+      ...reference,
+      candidate_group: "qualified",
+    }));
+    const needsReview = (payload.needs_review_references || []).map((reference) => ({
+      ...reference,
+      candidate_group: "needs_review",
+    }));
+    const rejected = (payload.rejected_references || []).map((reference) => ({
+      ...reference,
+      candidate_group: "rejected",
+    }));
+    const references = [...qualified, ...needsReview, ...rejected].map((reference, index) => ({
+      ...reference,
+      candidate_id: reference.dedupe_key || reference.source || reference.doi || reference.title || `candidate-${index}`,
+    }));
+    const selectedIds = new Set(qualified.map((reference, index) => (
+      reference.dedupe_key || reference.source || reference.doi || reference.title || `candidate-${index}`
+    )));
+    return { references, selectedIds, qualified, needsReview, rejected };
+  }
+
+  function showSearchTaskTarget(targetView, step = 2) {
+    if (targetView === "standaloneSearch") {
+      navigate("standaloneSearch");
+      return;
+    }
+    showSearchStep(step);
+  }
+
+  async function submitLiteratureSearch(targetView = "search") {
     const query = searchForm.query.trim();
     if (!query) {
       setSearchStatus(t("status.enterSearchQuery"));
       setSearchStatusError(false);
-      showSearchStep(1);
+      showSearchTaskTarget(targetView, 1);
       return;
     }
     const sources = searchForm.sources.join(",");
     if (!sources) {
       setSearchStatus(t("status.chooseSource"));
       setSearchStatusError(false);
-      showSearchStep(1);
+      showSearchTaskTarget(targetView, 1);
       return;
     }
     const runId = ++searchRunId.current;
@@ -659,7 +802,7 @@ export default function App() {
     setHasSearchResult(true);
     setSearchStatus(t("status.searchingCandidates"));
     setSearchStatusError(false);
-    showSearchStep(2);
+    showSearchTaskTarget(targetView, 2);
     try {
       let payload = await submitLiteratureSearchRequest({
         query,
@@ -678,7 +821,7 @@ export default function App() {
         setSelectedCandidateIds(new Set());
         setCandidatePayload({ rejected_count: 0, errors: {} });
         setHasSearchResult(true);
-        setSearchStatus(t("status.searchQueued"));
+        setSearchStatus(t(targetView === "standaloneSearch" ? "standaloneSearch.searchQueued" : "status.searchQueued"));
         setSearchStatusError(false);
         payload = await waitForJob("/api/literature-search", payload.job_id, (message) => {
           if (searchRunId.current === runId) setSearchStatus(message || t("status.searchingCandidates"));
@@ -699,6 +842,122 @@ export default function App() {
         setSearchLoading(false);
         setSearchStep(2);
       }
+    }
+  }
+
+  async function submitStandaloneLiteratureSearch() {
+    const query = standaloneSearchForm.query.trim();
+    if (!query) {
+      setStandaloneSearchStatus(t("status.enterSearchQuery"));
+      setStandaloneSearchStatusError(false);
+      navigate("standaloneSearch");
+      return;
+    }
+    const sources = standaloneSearchForm.sources.join(",");
+    if (!sources) {
+      setStandaloneSearchStatus(t("status.chooseSource"));
+      setStandaloneSearchStatusError(false);
+      navigate("standaloneSearch");
+      return;
+    }
+    const runId = ++standaloneSearchRunId.current;
+    setStandaloneSearchLoading(true);
+    setStandaloneHasSearchResult(true);
+    setStandaloneSearchStatus(t("status.searchingCandidates"));
+    setStandaloneSearchStatusError(false);
+    navigate("standaloneSearch");
+    try {
+      let payload = await submitLiteratureSearchRequest({
+        query,
+        sources,
+        search_mode: standaloneSearchForm.searchMode || "auto",
+        max_results_per_source: Number(standaloneSearchForm.limit || 5),
+        year: standaloneSearchForm.year.trim(),
+        include_needs_review: standaloneSearchForm.includeNeedsReview,
+        append_annotation_record: standaloneSearchForm.appendAnnotationRecord,
+        run_async: true,
+      });
+      if (payload.status === "queued" && payload.job_id) {
+        setStandaloneActiveSearchHistoryId(payload.history_id || "");
+        loadHistory(payload.history_id);
+        setStandaloneSearchCandidateReferences([]);
+        setStandaloneSelectedCandidateIds(new Set());
+        setStandaloneCandidatePayload({ rejected_count: 0, errors: {} });
+        setStandaloneHasSearchResult(true);
+        setStandaloneSearchStatus(t("standaloneSearch.searchQueued"));
+        setStandaloneSearchStatusError(false);
+        payload = await waitForJob("/api/literature-search", payload.job_id, (message) => {
+          if (standaloneSearchRunId.current === runId) setStandaloneSearchStatus(message || t("status.searchingCandidates"));
+        }, t);
+      }
+      if (standaloneSearchRunId.current !== runId) return;
+      applyStandaloneSearchResultPayload(payload);
+    } catch (error) {
+      if (standaloneSearchRunId.current !== runId) return;
+      setStandaloneSearchCandidateReferences([]);
+      setStandaloneSelectedCandidateIds(new Set());
+      setStandaloneCandidatePayload({ rejected_count: 0, errors: { search: error.message } });
+      setStandaloneSearchStatus(t("status.searchFailed", { message: error.message }));
+      setStandaloneSearchStatusError(true);
+      if (error.payload?.history_id) loadHistory(error.payload.history_id);
+    } finally {
+      if (standaloneSearchRunId.current === runId) {
+        setStandaloneSearchLoading(false);
+      }
+    }
+  }
+
+  async function submitNoveltyCheck() {
+    const innovationText = noveltyForm.innovationText.trim();
+    if (!innovationText) {
+      setNoveltyStatus(t("novelty.needInput"));
+      setNoveltyStatusError(false);
+      navigate("novelty");
+      return;
+    }
+    const sources = noveltyForm.sources.join(",");
+    if (!sources) {
+      setNoveltyStatus(t("status.chooseSource"));
+      setNoveltyStatusError(false);
+      navigate("novelty");
+      return;
+    }
+    const runId = ++noveltyRunId.current;
+    setNoveltyRunning(true);
+    setNoveltyResult(null);
+    setNoveltyStatus(t("novelty.submitting"));
+    setNoveltyStatusError(false);
+    navigate("novelty");
+    try {
+      let payload = await submitNoveltyCheckRequest({
+        innovation_text: innovationText,
+        sources,
+        search_mode: noveltyForm.searchMode || "auto",
+        year: noveltyForm.year.trim(),
+        include_filtered_references: noveltyForm.includeFilteredReferences,
+      });
+      if (payload.status === "queued" && payload.job_id) {
+        setNoveltyActiveHistoryId(payload.history_id || "");
+        loadHistory(payload.history_id);
+        setNoveltyStatus(t("novelty.queued"));
+        payload = await waitForJob("/api/novelty-check", payload.job_id, (message) => {
+          if (noveltyRunId.current === runId) setNoveltyStatus(message || t("novelty.running"));
+        }, t);
+      }
+      if (noveltyRunId.current !== runId) return;
+      setNoveltyResult(payload);
+      setNoveltyActiveHistoryId(payload.history_id || "");
+      setNoveltyStatus(t("novelty.complete"));
+      setNoveltyStatusError(false);
+      loadHistory(payload.history_id);
+    } catch (error) {
+      if (noveltyRunId.current !== runId) return;
+      setNoveltyResult(null);
+      setNoveltyStatus(t("novelty.failed", { message: error.message }));
+      setNoveltyStatusError(true);
+      if (error.payload?.history_id) loadHistory(error.payload.history_id);
+    } finally {
+      if (noveltyRunId.current === runId) setNoveltyRunning(false);
     }
   }
 
@@ -734,6 +993,80 @@ export default function App() {
   function startNewSearchFlow() {
     const shouldContinue = window.confirm(t("search.newFlowConfirm"));
     if (!shouldContinue) return;
+    resetSearchTask();
+    setSearchStep(1);
+    navigate("search");
+  }
+
+  function startNewStandaloneSearchTask() {
+    const shouldContinue = !standaloneSearchLoading && !standaloneHasSearchResult && !standaloneActiveSearchHistoryId
+      ? true
+      : window.confirm(t("standaloneSearch.newTaskConfirm"));
+    if (!shouldContinue) return;
+    resetStandaloneSearchTask();
+    setStandaloneSearchStatus(t("standaloneSearch.newTaskReady"));
+    navigate("standaloneSearch");
+  }
+
+  function resetStandaloneSearchTask() {
+    standaloneSearchRunId.current += 1;
+    setStandaloneSearchLoading(false);
+    setStandaloneSearchForm((current) => ({
+      ...current,
+      query: "",
+      year: "",
+    }));
+    setStandaloneSearchCandidateReferences([]);
+    setStandaloneSelectedCandidateIds(new Set());
+    setStandaloneCandidatePayload({ rejected_count: 0, errors: {} });
+    setStandaloneHasSearchResult(false);
+    setStandaloneActiveSearchHistoryId("");
+    setStandaloneSearchStatus("");
+    setStandaloneSearchStatusError(false);
+  }
+
+  function startNewNoveltyTask() {
+    const shouldContinue = !noveltyRunning && !noveltyResult && !noveltyActiveHistoryId
+      ? true
+      : window.confirm(t("novelty.newTaskConfirm"));
+    if (!shouldContinue) return;
+    resetNoveltyTask();
+    setNoveltyStatus(t("novelty.newTaskReady"));
+    navigate("novelty");
+  }
+
+  function resetNoveltyTask() {
+    noveltyRunId.current += 1;
+    setNoveltyRunning(false);
+    setNoveltyForm((current) => ({
+      ...current,
+      innovationText: "",
+      year: "",
+    }));
+    setNoveltyResult(null);
+    setNoveltyActiveHistoryId("");
+    setNoveltyStatus("");
+    setNoveltyStatusError(false);
+  }
+
+  function sendStandaloneSearchToFlow() {
+    setSearchForm({ ...standaloneSearchForm });
+    setSearchCandidateReferences(standaloneSearchCandidateReferences.map((reference) => ({ ...reference })));
+    setSelectedCandidateIds(new Set(standaloneSelectedCandidateIds));
+    setCandidatePayload({ ...standaloneCandidatePayload });
+    setHasSearchResult(standaloneHasSearchResult);
+    setActiveSearchHistoryId(standaloneActiveSearchHistoryId);
+    setSearchStatus(standaloneSearchStatus || (standaloneHasSearchResult ? t("history.continueSearchLoaded", { count: standaloneSearchCandidateReferences.length }) : ""));
+    setSearchStatusError(standaloneSearchStatusError);
+    setSearchLoading(false);
+    setSearchAnalysisQueued(false);
+    setStagedAnalysisReferences([]);
+    updateResult("search", createEmptyAnalysisResult());
+    setSearchStep(standaloneHasSearchResult ? 2 : 1);
+    navigate("search");
+  }
+
+  function resetSearchTask() {
     searchRunId.current += 1;
     analysisRunIds.current.search += 1;
     setSearchLoading(false);
@@ -753,8 +1086,6 @@ export default function App() {
     setSearchStatus("");
     setSearchStatusError(false);
     updateResult("search", createEmptyAnalysisResult());
-    setSearchStep(1);
-    navigate("search");
   }
 
   function startNewDirectTask() {
@@ -817,7 +1148,12 @@ export default function App() {
       navigate("results");
       return;
     }
-    if (view === "search" && searchStep === 4 && (analysisRunning.search || hasSearchAnalysisResult)) {
+    if (view === "search" && searchStep === 4 && analysisRunning.search) {
+      setActiveAnalysisSource("search");
+      navigate("search");
+      return;
+    }
+    if (view === "search" && searchStep === 4 && hasSearchAnalysisResult) {
       setActiveAnalysisSource("search");
       navigate("results");
       return;
@@ -865,6 +1201,49 @@ export default function App() {
             t={t}
           />
         ) : null}
+        {currentView === "standaloneSearch" ? (
+          <StandaloneSearchView
+            searchForm={standaloneSearchForm}
+            searchStatus={standaloneSearchStatus}
+            searchStatusError={standaloneSearchStatusError}
+            searchLoading={standaloneSearchLoading}
+            candidateMeta={standaloneCandidateMeta}
+            candidates={standaloneSearchCandidateReferences}
+            selectedCandidateIds={standaloneSelectedCandidateIds}
+            showStartNewTask={Boolean(standaloneActiveSearchHistoryId || standaloneSearchLoading || standaloneHasSearchResult)}
+            hasSearchResult={standaloneHasSearchResult}
+            onSearchFormChange={handleStandaloneSearchFormChange}
+            onToggleSource={handleStandaloneToggleSource}
+            onSubmitSearch={submitStandaloneLiteratureSearch}
+            onToggleCandidate={(candidateId, isSelected) => {
+              setStandaloneSelectedCandidateIds((current) => {
+                const next = new Set(current);
+                if (isSelected) next.add(candidateId);
+                else next.delete(candidateId);
+                return next;
+              });
+            }}
+            onStartNewTask={startNewStandaloneSearchTask}
+            onGoToSearchFlow={sendStandaloneSearchToFlow}
+            t={t}
+            language={language}
+          />
+        ) : null}
+        {currentView === "novelty" ? (
+          <NoveltyCheckView
+            form={noveltyForm}
+            status={noveltyStatus}
+            statusError={noveltyStatusError}
+            isRunning={noveltyRunning}
+            result={noveltyResult}
+            hasResult={Boolean(noveltyResult)}
+            onFormChange={handleNoveltyFormChange}
+            onToggleSource={handleNoveltyToggleSource}
+            onSubmit={submitNoveltyCheck}
+            onStartNewTask={startNewNoveltyTask}
+            t={t}
+          />
+        ) : null}
         {currentView === "search" ? (
           <SearchFlowView
             activeStep={searchStep}
@@ -884,7 +1263,7 @@ export default function App() {
             onStepChange={showSearchStep}
             onSearchFormChange={handleSearchFormChange}
             onToggleSource={handleToggleSource}
-            onSubmitSearch={submitLiteratureSearch}
+            onSubmitSearch={() => submitLiteratureSearch("search")}
             onToggleCandidate={toggleCandidate}
             onAddSelected={addSelectedSearchReferencesToAnalysis}
             onRemoveStaged={removeStagedAnalysisReference}
@@ -909,7 +1288,13 @@ export default function App() {
             showSearchFlowStepper={activeAnalysisSource === "search"}
             searchStep={searchStep}
             onSearchStepChange={(step) => {
-              if (step === 4 && (analysisRunning.search || hasSearchAnalysisResult)) {
+              if (step === 4 && analysisRunning.search) {
+                setSearchStep(4);
+                setActiveAnalysisSource("search");
+                navigate("search");
+                return;
+              }
+              if (step === 4 && hasSearchAnalysisResult) {
                 setSearchStep(4);
                 setActiveAnalysisSource("search");
                 navigate("results");

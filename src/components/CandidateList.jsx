@@ -2,8 +2,9 @@ import ReferenceLink from "./ReferenceLink.jsx";
 import { referenceIdentifierText, toStringList } from "../lib/formatters.js";
 
 export default function CandidateList({ candidates, selectedIds, meta, onToggle, t }) {
-  const qualified = candidates.filter((reference) => reference.candidate_group !== "needs_review");
+  const qualified = candidates.filter((reference) => reference.candidate_group === "qualified");
   const needsReview = candidates.filter((reference) => reference.candidate_group === "needs_review");
+  const rejected = candidates.filter((reference) => reference.candidate_group === "rejected");
 
   if (!candidates.length) {
     return (
@@ -22,12 +23,13 @@ export default function CandidateList({ candidates, selectedIds, meta, onToggle,
       <div className="candidate-list">
         <CandidateGroup title={t("candidate.qualified")} references={qualified} selectedIds={selectedIds} onToggle={onToggle} t={t} />
         <CandidateGroup title={t("candidate.needsReview")} references={needsReview} selectedIds={selectedIds} onToggle={onToggle} t={t} />
+        <CandidateGroup title={t("candidate.rejectedReferences")} references={rejected} selectedIds={selectedIds} onToggle={onToggle} t={t} selectable={false} />
       </div>
     </>
   );
 }
 
-function CandidateGroup({ title, references, selectedIds, onToggle, t }) {
+function CandidateGroup({ title, references, selectedIds, onToggle, t, selectable = true }) {
   if (!references.length) return null;
   return (
     <section className="candidate-group">
@@ -35,9 +37,10 @@ function CandidateGroup({ title, references, selectedIds, onToggle, t }) {
       {references.map((reference) => (
         <CandidateItem
           reference={reference}
-          checked={selectedIds.has(reference.candidate_id)}
+          checked={selectable && selectedIds.has(reference.candidate_id)}
           onToggle={onToggle}
           t={t}
+          selectable={selectable}
           key={reference.candidate_id}
         />
       ))}
@@ -45,17 +48,23 @@ function CandidateGroup({ title, references, selectedIds, onToggle, t }) {
   );
 }
 
-function CandidateItem({ reference, checked, onToggle, t }) {
-  const status = reference.candidate_group === "needs_review" ? "needs_review" : reference.screening_status;
-  const risks = [...toStringList(reference.screening_risks), ...toStringList(reference.verification_risks)];
+function CandidateItem({ reference, checked, onToggle, t, selectable = true }) {
+  const status = reference.candidate_group === "needs_review" ? "needs_review" : reference.screening_status || reference.candidate_group;
+  const risks = visibleRiskItems(reference);
   const identifier = translatedIdentifier(referenceIdentifierText(reference), t);
+  const itemClass = [
+    "candidate-item",
+    reference.candidate_group === "needs_review" ? "needs-review" : "",
+    reference.candidate_group === "rejected" ? "rejected-reference" : "",
+  ].filter(Boolean).join(" ");
   return (
-    <article className={`candidate-item ${reference.candidate_group === "needs_review" ? "needs-review" : ""}`}>
+    <article className={itemClass}>
       <label className="candidate-check">
         <input
           type="checkbox"
           checked={checked}
-          onChange={(event) => onToggle(reference.candidate_id, event.target.checked)}
+          disabled={!selectable}
+          onChange={(event) => selectable && onToggle(reference.candidate_id, event.target.checked)}
         />
         <span>
           <span className={`candidate-badge verification-${reference.verification_status || "partial"}`}>{reference.verification_status || "partial"}</span>{" "}
@@ -75,4 +84,25 @@ function CandidateItem({ reference, checked, onToggle, t }) {
 
 function translatedIdentifier(identifier, t) {
   return identifier === "无稳定 ID" ? t("reference.noStableId") : identifier;
+}
+
+function visibleRiskItems(reference) {
+  return Array.from(new Set([
+    ...toStringList(reference.screening_reasons).filter(isActionableScreeningReason),
+    ...toStringList(reference.screening_risks),
+    ...toStringList(reference.topic_relevance_risks),
+    ...toStringList(reference.verification_risks),
+  ].filter(Boolean)));
+}
+
+function isActionableScreeningReason(reason) {
+  return ![
+    "has_abstract",
+    "has_arxiv_id",
+    "has_authors",
+    "has_doi",
+    "has_pmid",
+    "has_stable_url",
+    "has_year",
+  ].includes(String(reason || "").trim());
 }

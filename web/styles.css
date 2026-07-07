@@ -1045,9 +1045,9 @@ select:focus {
 .summary-group {
   min-width: 0;
   padding: 13px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #fff;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .summary-group strong {

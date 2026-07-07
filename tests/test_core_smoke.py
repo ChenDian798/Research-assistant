@@ -7,14 +7,22 @@ from pathlib import Path
 import pytest
 
 from src.research_agent.literature_workflow import LiteratureAnalysisWorkflow
+from src.research_agent.novelty_check import NoveltyCheckWorkflow
+from src.research_agent.novelty_planner import build_novelty_plan, sanitize_innovation_text
+from src.research_agent.novelty_search import run_novelty_search_plan
 from src.research_agent.citations import format_references
+import src.research_agent.doi as doi_metadata
 from src.research_agent.doi import extract_arxiv_id, extract_doi, extract_pmid
+import src.research_agent.paper_search as paper_search
 from src.research_agent.paper_search import (
     LLMQueryRewriteParseError,
     PaperSearchError,
     build_academic_search_plan,
+    detect_stable_identifier,
     normalize_search_payload,
     parse_json_object,
+    predict_query_intent,
+    ranking_weights_for_intent,
     search_cnki_api,
     search_papers,
 )
@@ -160,6 +168,179 @@ class TranslatingLiteratureLLM:
         return '{"rows":[]}'
 
 
+def test_doi_enrichment_falls_back_to_openalex_abstract(monkeypatch) -> None:
+    doi_metadata._OPENALEX_DOI_CACHE.clear()
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout=12):
+        url = request.full_url
+        if "api.crossref.org" in url:
+            return FakeResponse(
+                {
+                    "message": {
+                        "DOI": "10.4324/9781315154930-7",
+                        "title": ["Optimal Scheduling of a Microgrid under Uncertainty Condition"],
+                        "author": [{"given": "Gabriella", "family": "Ferruzzi"}],
+                        "issued": {"date-parts": [[2017]]},
+                        "container-title": ["Analysis of Energy Systems"],
+                    }
+                }
+            )
+        if "api.openalex.org" in url:
+            return FakeResponse(
+                {
+                    "doi": "https://doi.org/10.4324/9781315154930-7",
+                    "display_name": "Optimal Scheduling of a Microgrid under Uncertainty Condition",
+                    "publication_year": 2017,
+                    "abstract_inverted_index": {
+                        "This": [0],
+                        "chapter": [1],
+                        "models": [2],
+                        "microgrid": [3],
+                        "scheduling": [4],
+                        "under": [5],
+                        "uncertainty.": [6],
+                    },
+                }
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(doi_metadata, "urlopen", fake_urlopen)
+
+    enriched = doi_metadata.enrich_references_with_doi_metadata(
+        [
+            {
+                "title": "Original title",
+                "doi": "10.4324/9781315154930-7",
+                "provenance": {"retrieved_from": "crossref", "evidence_level": "metadata"},
+            }
+        ]
+    )
+
+    assert enriched[0]["abstract"] == "This chapter models microgrid scheduling under uncertainty."
+    assert enriched[0]["provenance"]["evidence_level"] == "metadata+abstract"
+
+
+def test_literature_analysis_handler_passes_requested_output_language(monkeypatch) -> None:
+    sent = {}
+    thread_args = {}
+    history_request = {}
+    handler = object.__new__(ResearchWebHandler)
+    handler.server = type("FakeServer", (), {"server_port": 8125})()
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon) -> None:
+            thread_args["target"] = target
+            thread_args["args"] = args
+            thread_args["daemon"] = daemon
+
+        def start(self) -> None:
+            thread_args["started"] = True
+
+    monkeypatch.setattr(
+        handler,
+        "_read_json",
+        lambda: {
+            "topic": "stroke segmentation",
+            "references": [{"title": "Paper A", "source": "paper-a.pdf"}],
+            "output_language": "en",
+        },
+    )
+    monkeypatch.setattr(handler, "_send_json", lambda payload, status=200: sent.update(payload=payload, status=status))
+    monkeypatch.setattr(handler, "_augment_references_with_llm", lambda references, final_report, purpose: (references, []))
+
+    def fake_create_history_entry(**kwargs):
+        history_request.update(kwargs.get("request") or {})
+        return "history-language-1"
+
+    monkeypatch.setattr(handler, "_create_history_entry", fake_create_history_entry)
+    monkeypatch.setattr(web_app.threading, "Thread", FakeThread)
+
+    handler._handle_literature_analysis()
+
+    assert sent["status"] == 202
+    assert thread_args["started"] is True
+    assert thread_args["args"][-1] == "en"
+    assert history_request["output_language"] == "en"
+
+
+def test_pdf_upload_fields_preserve_requested_output_language() -> None:
+    class FakeMultipartForm:
+        def __init__(self) -> None:
+            self.values = {
+                "topic": "stroke segmentation",
+                "output_language": "en",
+                "user_context": "Please compare these papers.",
+            }
+
+        def getvalue(self, key, default=""):
+            return self.values.get(key, default)
+
+    fields = ResearchWebHandler._multipart_fields(FakeMultipartForm())
+
+    assert fields["output_language"] == "en"
+
+
+def test_literature_analysis_job_passes_output_language_to_workflow(monkeypatch, tmp_path) -> None:
+    captured = {}
+    handler = object.__new__(ResearchWebHandler)
+    web_app.JOBS.clear()
+    monkeypatch.setattr(web_app, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(web_app, "enrich_references_with_doi_metadata", lambda references: references)
+    monkeypatch.setattr(web_app, "format_references", lambda references, citation_format: ["Paper A."])
+
+    class FakeWorkflow:
+        def __init__(self, verbose=False) -> None:
+            captured["verbose"] = verbose
+
+        async def run(self, **kwargs):
+            captured.update(kwargs)
+            return {"rows": [], "summary": {"overall_assessment": "Done"}}
+
+    monkeypatch.setattr(web_app, "LiteratureAnalysisWorkflow", FakeWorkflow)
+
+    handler._run_literature_analysis_job(
+        "analysis-language-job",
+        "stroke segmentation",
+        [{"title": "Paper A", "source": "paper-a.pdf"}],
+        "",
+        output_language="en",
+    )
+
+    assert captured["output_language"] == "en"
+    assert web_app.JOBS["analysis-language-job"]["output_language"] == "en"
+
+
+def test_literature_workflow_run_english_skips_chinese_translation() -> None:
+    llm = TranslatingLiteratureLLM()
+    workflow = LiteratureAnalysisWorkflow(llm=llm)
+
+    result = asyncio.run(
+        workflow.run(
+            topic="stroke segmentation",
+            references=[{"title": "Paper A", "source": "paper-a.pdf"}],
+            output_language="en",
+        )
+    )
+
+    prompts = [call["system_prompt"] for call in llm.calls]
+    assert any("final integrator" in prompt for prompt in prompts)
+    assert not any("Chinese translation post-processor" in prompt for prompt in prompts)
+    assert result["summary"]["overall_assessment"] == "Paper A is covered."
+
+
 def test_paper_search_disabled_returns_clear_error(monkeypatch) -> None:
     sent = {}
     handler = object.__new__(ResearchWebHandler)
@@ -168,6 +349,19 @@ def test_paper_search_disabled_returns_clear_error(monkeypatch) -> None:
     monkeypatch.setattr(handler, "_send_json", lambda payload, status=200: sent.update(payload=payload, status=status))
 
     handler._handle_literature_search()
+
+    assert "Academic search is not enabled" in sent["payload"]["error"]
+    assert sent["payload"]["search_enabled"] is False
+
+
+def test_novelty_check_disabled_returns_clear_error(monkeypatch) -> None:
+    sent = {}
+    handler = object.__new__(ResearchWebHandler)
+
+    monkeypatch.setenv("PAPER_SEARCH_ENABLED", "false")
+    monkeypatch.setattr(handler, "_send_json", lambda payload, status=200: sent.update(payload=payload, status=status))
+
+    handler._handle_novelty_check()
 
     assert "Academic search is not enabled" in sent["payload"]["error"]
     assert sent["payload"]["search_enabled"] is False
@@ -197,6 +391,1004 @@ def test_search_result_maps_to_reference_shape(monkeypatch) -> None:
     assert result["papers"][0]["source_origin"] == "paper_search_mcp"
     assert result["papers"][0]["source_label"] == "Semantic Scholar"
     assert result["papers"][0]["source"] == "https://doi.org/10.1000/example"
+
+
+def test_exact_title_search_supplements_rewritten_topic_query(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {
+            "results": {
+                "arxiv": [
+                    {
+                        "title": "A Recent Transformer Architecture Paper",
+                        "authors": ["Ada Lovelace"],
+                        "year": "2026",
+                        "url": "https://arxiv.org/abs/2606.00001",
+                        "arxiv_id": "2606.00001",
+                        "abstract": "A broad topic match.",
+                        "source": "arxiv",
+                    }
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_exact_title_search_by_source",
+        lambda *args, **kwargs: {
+            "results": {
+                "arxiv": [
+                    {
+                        "title": "Attention Is All You Need",
+                        "authors": ["Ashish Vaswani"],
+                        "year": "2017",
+                        "url": "https://arxiv.org/abs/1706.03762",
+                        "arxiv_id": "1706.03762",
+                        "abstract": "We propose the Transformer.",
+                        "source": "arxiv",
+                    }
+                ]
+            }
+        },
+    )
+
+    result = search_papers("attention is all you need", sources="arxiv", max_results_per_source=1, search_mode="computer")
+
+    assert result["exact_title_source_results"]["arxiv"] == 1
+    assert result["papers"][0]["title"] == "Attention Is All You Need"
+    assert result["papers"][0]["source"] == "https://arxiv.org/abs/1706.03762"
+
+
+def test_arxiv_title_search_retries_rate_limit(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    atom = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+      <entry>
+        <id>https://arxiv.org/abs/1706.03762</id>
+        <title>Attention Is All You Need</title>
+        <summary>We propose the Transformer.</summary>
+        <published>2017-06-12T00:00:00Z</published>
+        <updated>2017-06-12T00:00:00Z</updated>
+        <author><name>Ashish Vaswani</name></author>
+      </entry>
+    </feed>"""
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return atom.encode("utf-8")
+
+    calls = []
+
+    def fake_urlopen(request, *, timeout):
+        calls.append((request.full_url, timeout))
+        if len(calls) == 1:
+            raise HTTPError(request.full_url, 429, "Too Many Requests", {}, None)
+        return FakeResponse()
+
+    monkeypatch.setenv("PAPER_SEARCH_ARXIV_DELAY_SECONDS", "0")
+    monkeypatch.setenv("PAPER_SEARCH_ARXIV_RETRIES", "2")
+    monkeypatch.setattr(paper_search, "urlopen", fake_urlopen)
+    monkeypatch.setattr(paper_search.time, "sleep", lambda seconds: None)
+
+    results = paper_search.search_arxiv_title_api("Attention Is All You Need", 1)
+
+    assert len(calls) == 2
+    assert calls[0][1] == 20
+    assert results[0]["arxiv_id"] == "1706.03762"
+
+
+def test_exact_title_search_survives_llm_query_rewrite(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_query": "attention is all you need transformer architecture",
+            "pubmed_query": "",
+            "core_concepts": [
+                {"concept": "Transformer", "type": "model", "must_keep": True},
+                {"concept": "attention mechanism", "type": "method", "must_keep": True},
+            ],
+            "recommended_sources": ["arxiv", "pubmed"],
+            "avoid_sources": ["pubmed"],
+            "rationale": "Famous CS paper.",
+        }
+
+    async def fake_intent(query, *, search_mode="auto"):
+        del query, search_mode
+        return {
+            "title": 0.95,
+            "author": 0.05,
+            "citation": 0.1,
+            "topic": 0.25,
+            "method_task": 0.1,
+            "abstract": 0.0,
+            "rationale": "The input is an exact paper title.",
+            "extracted": {"title": "Attention Is All You Need", "authors": [], "year": "", "venue": "", "method_terms": [], "task_terms": []},
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_INTENT_PREDICTION", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.classify_query_intent_with_llm", fake_intent)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {
+            "results": {
+                "pubmed": [
+                    {
+                        "title": "AttentionSmithy: A Modular Framework for Rapid Transformer Development.",
+                        "authors": ["Caleb Cranney"],
+                        "year": "2025",
+                        "pmid": "41836271",
+                        "abstract": "Mentions Attention Is All You Need.",
+                        "source": "pubmed",
+                    }
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_exact_title_search_by_source",
+        lambda *args, **kwargs: {
+            "results": {
+                "arxiv": [
+                    {
+                        "title": "Attention Is All You Need",
+                        "authors": ["Ashish Vaswani"],
+                        "year": "2017",
+                        "url": "https://arxiv.org/abs/1706.03762",
+                        "arxiv_id": "1706.03762",
+                        "abstract": "We propose the Transformer.",
+                        "source": "arxiv",
+                    }
+                ],
+                "pubmed": [],
+            }
+        },
+    )
+
+    result = search_papers("attention is all you need", sources="arxiv,pubmed", max_results_per_source=5, search_mode="computer")
+
+    channel_names = [channel["name"] for channel in result["query_plan"]["recall_channels"]]
+    assert "exact_title" in channel_names
+    assert "topic" in channel_names
+    assert result["query_plan"]["intent"]["intent_source"] == "llm"
+    assert result["exact_title_source_results"]["arxiv"] == 1
+    assert result["papers"][0]["title"] == "Attention Is All You Need"
+    assert result["papers"][0]["arxiv_id"] == "1706.03762"
+
+
+def test_author_title_identity_search_uses_extracted_title_and_repairs_canonical(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        assert query == "attention is all you needs Ashish Vaswani"
+        del requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "citation",
+            "intent_confidence": 0.95,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Ashish Vaswani"],
+                "year": "",
+                "venue": "NeurIPS",
+                "method_terms": [],
+                "task_terms": [],
+            },
+            "search_query": "Attention Is All You Need Ashish Vaswani",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["crossref"],
+            "avoid_sources": [],
+            "rationale": "Specific paper with title and author.",
+        }
+
+    exact_calls = []
+
+    def fake_exact_title(title, sources, *, max_results_per_source):
+        del max_results_per_source
+        exact_calls.append((title, tuple(sources)))
+        results = {source: [] for source in sources}
+        if "crossref" in sources:
+            results["crossref"] = [
+                {
+                    "title": "Attention Is All You Need",
+                    "authors": ["Ashish Vaswani"],
+                    "year": "2026",
+                    "doi": "10.9999/unstable-mirror",
+                    "url": "https://doi.org/10.9999/unstable-mirror",
+                    "abstract": "Mirror metadata for the Transformer paper.",
+                    "source": "crossref",
+                }
+            ]
+        if "arxiv" in sources:
+            results["arxiv"] = [
+                {
+                    "title": "Attention Is All You Need",
+                    "authors": ["Ashish Vaswani", "Noam Shazeer"],
+                    "year": "2017",
+                    "url": "https://arxiv.org/abs/1706.03762",
+                    "arxiv_id": "1706.03762",
+                    "abstract": "We propose the Transformer.",
+                    "source": "arxiv",
+                }
+            ]
+        return {"results": results}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_INTENT_PREDICTION", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.run_exact_title_search_by_source", fake_exact_title)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {
+            "results": {
+                "crossref": [
+                    {
+                        "title": "Analyzing Multi-Head Self-Attention in Transformer Models",
+                        "authors": ["Other Author"],
+                        "year": "2020",
+                        "doi": "10.1000/topic-similar",
+                        "abstract": "A topic-similar paper about attention.",
+                        "source": "crossref",
+                    }
+                ]
+            }
+        },
+    )
+
+    result = search_papers(
+        "attention is all you needs Ashish Vaswani",
+        sources="crossref",
+        max_results_per_source=3,
+        search_mode="auto",
+    )
+
+    assert exact_calls
+    assert all(call[0] == "Attention Is All You Need" for call in exact_calls)
+    assert result["query_plan"]["query_intent"] in {"author+title", "citation_with_title_author"}
+    assert result["query_plan"]["bibliographic_identity"]["authors"] == ["Ashish Vaswani"]
+    assert result["papers"][0]["title"] == "Attention Is All You Need"
+    assert result["papers"][0]["arxiv_id"] == "1706.03762"
+    assert result["papers"][0]["retrieval_channel"] == "canonical_repair"
+    assert result["papers"][0]["ranking_signals"]["author_match"] >= 0.45
+    assert "author_match" in result["papers"][0]["selection_reasons"]
+    assert result["papers"][0]["candidate_score"] > result["papers"][-1]["candidate_score"]
+
+
+def test_query_intent_distinguishes_title_author_topic_and_abstract() -> None:
+    title_intent = predict_query_intent("attention is all you need")
+    author_intent = predict_query_intent("Ashish Vaswani")
+    topic_intent = predict_query_intent("低资源脑梗死 CT 分割轻量化模型")
+    abstract_intent = predict_query_intent(" ".join(["This study proposes a lightweight segmentation model."] * 20))
+
+    assert title_intent["scores"]["title"] >= 0.65
+    assert ranking_weights_for_intent(title_intent)["normalized"]["title"] > ranking_weights_for_intent(title_intent)["normalized"]["topic"]
+    assert author_intent["scores"]["author"] >= 0.65
+    assert topic_intent["scores"]["topic"] > topic_intent["scores"]["title"]
+    assert topic_intent["scores"]["method_task"] > 0
+    assert abstract_intent["scores"]["abstract"] >= 0.65
+
+
+def test_query_intent_uses_llm_when_available(monkeypatch) -> None:
+    async def fake_intent(query, *, search_mode="auto"):
+        assert query == "attention is all you need"
+        assert search_mode == "computer"
+        return {
+            "title": 0.97,
+            "author": 0.0,
+            "citation": 0.05,
+            "topic": 0.15,
+            "method_task": 0.0,
+            "abstract": 0.0,
+            "rationale": "Exact famous paper title.",
+            "extracted": {"title": "Attention Is All You Need", "authors": [], "year": "", "venue": "", "method_terms": [], "task_terms": []},
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_INTENT_PREDICTION", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("src.research_agent.paper_search.classify_query_intent_with_llm", fake_intent)
+
+    intent = predict_query_intent("attention is all you need", search_mode="computer")
+
+    assert intent["intent_source"] == "llm"
+    assert intent["scores"]["title"] == 0.97
+    assert intent["template"] == "title"
+    assert intent["extracted"]["title"] == "Attention Is All You Need"
+
+
+def test_stable_identifier_short_circuits_topic_recall(monkeypatch) -> None:
+    backend_called = False
+
+    def fake_backend(*args, **kwargs):
+        nonlocal backend_called
+        backend_called = True
+        return {"results": {"crossref": []}}
+
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend_by_source", fake_backend)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.fetch_stable_crossref_metadata",
+        lambda doi: {
+            "doi": doi,
+            "title": "Stable DOI Paper",
+            "authors": "Ada Lovelace",
+            "year": "2024",
+            "source": f"https://doi.org/{doi}",
+        },
+    )
+    monkeypatch.setattr("src.research_agent.paper_search.doi_resolution_status", lambda doi: "resolved")
+
+    assert detect_stable_identifier("https://doi.org/10.1000/example") == {
+        "type": "doi",
+        "value": "10.1000/example",
+        "raw": "https://doi.org/10.1000/example",
+    }
+
+    result = search_papers("https://doi.org/10.1000/example", sources="crossref", max_results_per_source=5)
+
+    assert backend_called is False
+    assert result["query_rewrite_status"] == "stable_identifier"
+    assert result["query_plan"]["identifier_short_circuit"] is True
+    assert result["papers"][0]["title"] == "Stable DOI Paper"
+    assert result["papers"][0]["doi"] == "10.1000/example"
+
+
+def test_failed_doi_short_circuit_is_review_only_after_verification(monkeypatch) -> None:
+    monkeypatch.setattr("src.research_agent.paper_search.fetch_stable_crossref_metadata", lambda doi: {})
+    monkeypatch.setattr("src.research_agent.paper_search.doi_resolution_status", lambda doi: "failed")
+
+    result = search_papers("10.65215/2q58a426", sources="crossref", max_results_per_source=5)
+    verified = verify_reference(result["papers"][0])
+    qualified, needs_review = ResearchWebHandler._split_verified_search_candidates([verified], [])
+
+    assert qualified == []
+    assert needs_review[0]["screening_status"] == "needs_review"
+    assert "doi_resolution_failed" in needs_review[0]["verification_risks"]
+
+
+def test_author_query_uses_author_intent_without_forcing_title_qualified(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {
+            "results": {
+                "semantic": [
+                    {
+                        "title": "A Transformer Paper by Another Author",
+                        "authors": ["Other Person"],
+                        "year": "2024",
+                        "url": "https://www.semanticscholar.org/paper/example",
+                        "abstract": "General transformer content.",
+                        "source": "semantic",
+                    },
+                    {
+                        "title": "Attention Is All You Need",
+                        "authors": ["Ashish Vaswani"],
+                        "year": "2017",
+                        "url": "https://arxiv.org/abs/1706.03762",
+                        "arxiv_id": "1706.03762",
+                        "abstract": "Transformer architecture.",
+                        "source": "semantic",
+                    },
+                ]
+            }
+        },
+    )
+
+    result = search_papers("Ashish Vaswani", sources="semantic", max_results_per_source=5, search_mode="computer")
+
+    assert result["query_plan"]["intent_scores"]["author"] >= 0.65
+    assert result["papers"][0]["authors"] == "Ashish Vaswani"
+    assert "author_match" in result["papers"][0]["selection_reasons"]
+
+
+def test_author_channel_uses_source_specific_author_queries(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr(
+        paper_search,
+        "search_arxiv_api",
+        lambda query, max_results, timeout_seconds=20: calls.append(("arxiv", query, max_results)) or [],
+    )
+    monkeypatch.setattr(
+        paper_search,
+        "search_crossref_api",
+        lambda query, max_results: calls.append(("crossref", query, max_results)) or [],
+    )
+    monkeypatch.setattr(
+        paper_search,
+        "search_openalex_api",
+        lambda query, max_results: calls.append(("openalex", query, max_results)) or [],
+    )
+    monkeypatch.setattr(
+        paper_search,
+        "run_paper_search_backend",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fielded author queries should use local source adapters")),
+    )
+
+    payload = paper_search.run_paper_search_backend_by_source(
+        {
+            "arxiv": "au:Ashish AND au:Vaswani",
+            "crossref": 'author:"Ashish Vaswani"',
+            "openalex": 'author:"Ashish Vaswani"',
+        },
+        max_results_per_source=5,
+        year="",
+        timeout_seconds=20,
+    )
+
+    assert payload["errors"] == {}
+    assert calls == [
+        ("arxiv", "au:Ashish AND au:Vaswani", 5),
+        ("crossref", 'author:"Ashish Vaswani"', 5),
+        ("openalex", 'author:"Ashish Vaswani"', 5),
+    ]
+
+
+def test_rules_author_channel_uses_bibliographic_identity_for_source_specific_query(monkeypatch) -> None:
+    calls = []
+
+    def fake_backend(queries_by_source, **kwargs):
+        del kwargs
+        calls.append(dict(queries_by_source))
+        return {"results": {"arxiv": []}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        fake_backend,
+    )
+
+    search_papers("Ashish Vaswani", sources="arxiv", max_results_per_source=2, search_mode="computer")
+
+    assert calls[0]["arxiv"] == "au:Ashish AND au:Vaswani"
+
+
+def test_author_only_channel_uses_full_internal_recall_budget(monkeypatch) -> None:
+    captured = []
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del year, timeout_seconds
+        captured.append((dict(queries_by_source), max_results_per_source))
+        return {"results": {"arxiv": []}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = search_papers("Ashish Vaswani", sources="arxiv", max_results_per_source=5, search_mode="computer")
+
+    author_channel = next(channel for channel in result["query_plan"]["recall_channels"] if channel["name"] == "author")
+    assert author_channel["budget"] == result["query_plan"]["max_internal_results_per_source"]
+    assert captured[0][1] == result["query_plan"]["max_internal_results_per_source"]
+
+
+def test_final_search_limits_keep_per_source_and_global_caps() -> None:
+    qualified = [
+        {"title": f"arxiv qualified {index}", "retrieved_from": "arxiv", "source": f"https://arxiv.org/abs/2606.{index:05d}"}
+        for index in range(7)
+    ] + [
+        {"title": f"crossref qualified {index}", "retrieved_from": "crossref", "source": f"https://doi.org/10.1000/{index}"}
+        for index in range(3)
+    ]
+    needs_review = [
+        {"title": f"arxiv review {index}", "retrieved_from": "arxiv", "source": f"https://arxiv.org/abs/2506.{index:05d}"}
+        for index in range(4)
+    ]
+
+    final_qualified, final_needs_review = ResearchWebHandler._apply_final_search_limits(
+        qualified,
+        needs_review,
+        requested_sources=["arxiv", "crossref"],
+        max_results_per_source=5,
+        include_needs_review=True,
+    )
+
+    combined = final_qualified + final_needs_review
+    assert len(combined) <= 10
+    assert sum(item["retrieved_from"] == "arxiv" for item in combined) <= 5
+    assert sum(item["retrieved_from"] == "crossref" for item in combined) <= 5
+    assert final_qualified[0]["title"] == "arxiv qualified 0"
+    assert all("review" not in item["title"] for item in final_needs_review)
+
+
+def test_novelty_workflow_rules_flags_overlap_without_llm(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    workflow = NoveltyCheckWorkflow()
+
+    result = asyncio.run(
+        workflow.run(
+            innovation_text=(
+                "A lightweight encoder with cross-domain consistency for ischemic stroke "
+                "lesion segmentation on non-contrast CT."
+            ),
+            references=[
+                {
+                    "title": "Lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT",
+                    "abstract": "We use cross-domain consistency constraints for CT lesion segmentation.",
+                    "source": "https://doi.org/10.1000/novelty",
+                    "doi": "10.1000/novelty",
+                }
+            ],
+            search_payload={"query": "stroke CT segmentation", "sources_used": ["semantic"]},
+        )
+    )
+
+    assert result["overall"]["risk_level"] in {"high", "moderate"}
+    assert result["counts"]["total"] == 1
+    assert result["comparisons"][0]["overlap_level"] in {"high_overlap", "partial_overlap"}
+    assert result["search"]["query"] == "stroke CT segmentation"
+
+
+def test_novelty_profile_tracks_domain_and_innovation_types(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow().run(
+            innovation_text=(
+                "A new transformer training strategy for low-resource legal RAG, "
+                "with a benchmark evaluation and hallucination metric."
+            ),
+            references=[
+                {
+                    "title": "Transformer retrieval augmented generation for legal question answering",
+                    "abstract": "We evaluate legal RAG models on a benchmark with hallucination metrics.",
+                    "candidate_status": "strong_candidate",
+                }
+            ],
+            search_payload={"search_mode": "computer"},
+        )
+    )
+
+    profile = result["innovation_profile"]
+    assert profile["domain"] == "computer"
+    profile_types = {row["type"] for row in profile["innovation_types"]}
+    focus_keys = {row["key"] for row in profile["domain_focus"]}
+    assert {"technical_route", "evaluation_design"}.issubset(profile_types)
+    assert {"computer_model", "computer_benchmark"}.issubset(focus_keys)
+
+
+class CaptureNoveltyLLM:
+    def __init__(self) -> None:
+        self.calls: list[list[int]] = []
+
+    async def complete(self, *, system_prompt, user_prompt, temperature, max_tokens, model=None):
+        del system_prompt, temperature, max_tokens, model
+        payload = json.loads(user_prompt.split("Candidate literature metadata:\n", 1)[1])
+        indexes = [int(item["reference_index"]) for item in payload]
+        self.calls.append(indexes)
+        return json.dumps(
+            {
+                "innovation_claims": ["claim"],
+                "overall": {"risk_level": "moderate", "assessment": "Batch assessment.", "confidence": "medium"},
+                "comparisons": [
+                    {
+                        "reference_index": index,
+                        "overlap_level": "partial_overlap",
+                        "overlap_score": 0.55,
+                        "overlap_points": ["shared task"],
+                        "difference_points": ["method details differ"],
+                        "dimension_overlap": {
+                            "target_problem": "same",
+                            "data_or_population": "similar",
+                            "method": "partial",
+                            "application_context": "similar",
+                            "evaluation": "unknown",
+                        },
+                        "evidence": "metadata",
+                        "recommendation": "Verify full text.",
+                    }
+                    for index in indexes
+                ],
+                "next_steps": ["Check closest papers."],
+            }
+        )
+
+
+def test_novelty_llm_assessment_batches_top_candidates(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_CHECK_MAX_LLM_REFERENCES", "5")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_BATCH_SIZE", "2")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_PARALLEL_BATCHES", "3")
+    llm = CaptureNoveltyLLM()
+    references = [
+        {
+            "title": f"Stroke CT segmentation candidate {index}",
+            "abstract": "ischemic stroke non-contrast CT lesion segmentation lightweight encoder",
+            "source": f"https://doi.org/10.1000/{index}",
+            "doi": f"10.1000/{index}",
+            "candidate_status": "strong_candidate" if index < 6 else "weak_candidate",
+            "screening_status": "qualified",
+            "matched_concepts": {"required": ["ischemic stroke", "non-contrast CT", "lesion segmentation"] if index < 6 else []},
+        }
+        for index in range(8)
+    ]
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow(llm=llm).run(
+            innovation_text="A lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT.",
+            references=references,
+            search_payload={},
+        )
+    )
+
+    sent_indexes = sorted(index for call in llm.calls for index in call)
+    assert sorted(len(call) for call in llm.calls) == [1, 2, 2]
+    assert len(sent_indexes) == 5
+    assert all(index < 6 for index in sent_indexes)
+    assert result["llm_assessment"]["selected_reference_count"] == 5
+    assert result["llm_assessment"]["batch_count"] == 3
+    assert result["llm_assessment"]["succeeded_batch_count"] == 3
+    assert result["counts"]["total"] == 8
+
+
+class SlowNoveltyLLM:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def complete(self, *, system_prompt, user_prompt, temperature, max_tokens, model=None):
+        del system_prompt, temperature, max_tokens, model
+        payload = json.loads(user_prompt.split("Candidate literature metadata:\n", 1)[1])
+        indexes = [int(item["reference_index"]) for item in payload]
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.05)
+        self.active -= 1
+        return json.dumps(
+            {
+                "innovation_claims": ["claim"],
+                "overall": {"risk_level": "moderate", "assessment": "Parallel batch assessment.", "confidence": "medium"},
+                "comparisons": [
+                    {
+                        "reference_index": index,
+                        "overlap_level": "partial_overlap",
+                        "overlap_score": 0.5,
+                        "overlap_points": ["shared method"],
+                        "difference_points": ["details need review"],
+                        "dimension_overlap": {"target_problem": "same", "data_or_population": "similar", "method": "partial", "application_context": "similar", "evaluation": "unknown"},
+                        "evidence": "metadata",
+                        "recommendation": "Verify full text.",
+                    }
+                    for index in indexes
+                ],
+                "next_steps": [],
+            }
+        )
+
+
+def test_novelty_llm_batches_can_run_in_parallel(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_CHECK_MAX_LLM_REFERENCES", "4")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_BATCH_SIZE", "1")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_PARALLEL_BATCHES", "3")
+    llm = SlowNoveltyLLM()
+
+    references = [
+        {
+            "title": f"Stroke CT segmentation candidate {index}",
+            "abstract": "ischemic stroke non-contrast CT lesion segmentation lightweight encoder",
+            "candidate_status": "strong_candidate",
+            "screening_status": "qualified",
+        }
+        for index in range(4)
+    ]
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow(llm=llm).run(
+            innovation_text="A lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT.",
+            references=references,
+            search_payload={},
+        )
+    )
+
+    assert llm.max_active > 1
+    assert result["llm_assessment"]["batch_count"] == 4
+    assert result["llm_assessment"]["status"] == "done"
+
+
+class PartiallyFailingNoveltyLLM(CaptureNoveltyLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.call_count = 0
+
+    async def complete(self, **kwargs) -> str:
+        self.call_count += 1
+        if self.call_count == 1:
+            raise TimeoutError()
+        return await super().complete(**kwargs)
+
+
+def test_novelty_llm_partial_batch_failure_warns_user(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_CHECK_MAX_LLM_REFERENCES", "3")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_BATCH_SIZE", "1")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_PARALLEL_BATCHES", "3")
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow(llm=PartiallyFailingNoveltyLLM()).run(
+            innovation_text="A lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT.",
+            references=[
+                {
+                    "title": f"Lightweight encoder for ischemic stroke lesion segmentation {index}",
+                    "abstract": "ischemic stroke non-contrast CT lesion segmentation lightweight encoder",
+                    "candidate_status": "strong_candidate",
+                }
+                for index in range(3)
+            ],
+            search_payload={},
+        )
+    )
+
+    assert result["status"] == "done"
+    assert result["llm_assessment"]["status"] == "partial"
+    assert result["llm_assessment"]["warnings"]
+    assert "mixes model judgments" in result["overall"]["assessment"]
+
+
+class TimeoutNoveltyLLM:
+    async def complete(self, **kwargs):
+        del kwargs
+        raise TimeoutError()
+
+
+def test_novelty_llm_timeout_falls_back_to_rules(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_CHECK_MAX_LLM_REFERENCES", "3")
+    monkeypatch.setenv("NOVELTY_CHECK_LLM_BATCH_SIZE", "2")
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow(llm=TimeoutNoveltyLLM()).run(
+            innovation_text="A lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT.",
+            references=[
+                {
+                    "title": "Lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT",
+                    "abstract": "The method uses CT lesion segmentation.",
+                    "source": "https://doi.org/10.1000/fallback",
+                    "doi": "10.1000/fallback",
+                    "candidate_status": "strong_candidate",
+                }
+                for _ in range(3)
+            ],
+            search_payload={},
+        )
+    )
+
+    assert result["status"] == "done"
+    assert result["counts"]["total"] == 3
+    assert result["llm_assessment"]["status"] == "fallback"
+    assert result["llm_assessment"]["succeeded_batch_count"] == 0
+    assert result["llm_assessment"]["failed_batch_count"] == 2
+    assert result["llm_assessment"]["warnings"]
+    assert "falls back" in result["overall"]["assessment"]
+    assert any("falls back" in step for step in result["next_steps"])
+
+
+def test_novelty_planner_generates_layered_queries(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_PLANNER_LLM", "false")
+
+    plan = build_novelty_plan(
+        "本文面向低资源急性缺血性卒中非增强CT病灶分割，提出轻量化编码器和跨域一致性约束，并与nnU-Net对比。",
+        "biomedical",
+    )
+
+    purposes = {query["purpose"] for query in plan["queries"]}
+    pubmed_queries = [query for query in plan["queries"] if "pubmed" in query["sources"]]
+    assert len(plan["queries"]) >= 5
+    assert plan["claims"]
+    assert {"core_claim", "required_concepts", "method_concepts", "context_concepts", "baseline_concepts"} <= set(plan)
+    assert {"broad_topic", "core_topic", "method_overlap", "context_overlap", "baseline_overlap"} <= purposes
+    assert any(query["query_id"] == "pubmed_broad_topic" for query in pubmed_queries)
+    assert any(query["query_id"] == "pubmed_method_overlap" for query in pubmed_queries)
+    for claim in plan["claims"]:
+        claim_queries = [query for query in plan["queries"] if query.get("claim_id") == claim["claim_id"]]
+        assert {"exact_claim_query", "method_generalized_query", "task_generalized_query"} <= {
+            query.get("claim_query_type") for query in claim_queries
+        }
+
+
+def test_novelty_planner_removes_acceptance_notes(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_PLANNER_LLM", "false")
+
+    cleaned = sanitize_innovation_text(
+        "创新点：法律RAG问答中引入幻觉抑制评估。\n验收重点：报告应提示Semantic Scholar失败。\n测试要求：不要输出强判断。"
+    )
+
+    assert "法律RAG" in cleaned
+    assert "验收重点" not in cleaned
+    assert "测试要求" not in cleaned
+    assert "Semantic Scholar失败" not in cleaned
+
+
+def test_novelty_pubmed_broad_query_does_not_and_all_method_terms(monkeypatch) -> None:
+    monkeypatch.setenv("NOVELTY_PLANNER_LLM", "false")
+
+    plan = build_novelty_plan(
+        "低资源脑梗死非增强CT病灶分割，轻量化编码器，跨域一致性，小样本泛化，nnU-Net对比。",
+        "biomedical",
+    )
+    broad = next(query for query in plan["queries"] if query["query_id"] == "pubmed_broad_topic")
+
+    assert "ischemic stroke" in broad["query"]
+    assert "segmentation" in broad["query"]
+    assert "lightweight" not in broad["query"].lower()
+    assert "domain generalization" not in broad["query"].lower()
+    assert "few-shot" not in broad["query"].lower()
+
+
+def test_novelty_search_keeps_weak_candidates_when_strong_empty(monkeypatch) -> None:
+    plan = {
+        "required_concepts": [{"term": "ischemic stroke", "type": "condition", "must_keep": True}],
+        "method_concepts": [{"term": "lightweight encoder", "type": "method"}],
+        "context_concepts": [],
+        "baseline_concepts": [],
+        "queries": [
+            {
+                "query_id": "semantic_method_overlap",
+                "purpose": "method_overlap",
+                "sources": ["semantic"],
+                "query": "medical image segmentation lightweight encoder",
+                "strictness": "medium",
+                "max_results_per_source": 5,
+            }
+        ],
+    }
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del queries_by_source, max_results_per_source, year, timeout_seconds
+        return {
+            "results": {
+                "semantic": [
+                    {
+                        "title": "Lightweight encoder for medical image segmentation",
+                        "abstract": "An efficient lightweight encoder is evaluated for segmentation.",
+                        "doi": "10.1000/weak",
+                        "source": "semantic",
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("src.research_agent.novelty_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = run_novelty_search_plan(plan, "semantic", max_results_per_source=5)
+
+    assert result["strong_candidates"] == []
+    assert len(result["weak_candidates"]) == 1
+    assert result["candidates"][0]["candidate_status"] == "weak_candidate"
+    assert result["diagnostics"]["candidate_pool"]["sent_to_overlap_assessment"] == 1
+
+
+def test_novelty_search_candidates_keep_claim_query_metadata(monkeypatch) -> None:
+    plan = {
+        "required_concepts": [{"term": "ischemic stroke", "type": "condition", "must_keep": True}],
+        "method_concepts": [{"term": "lightweight encoder", "type": "method"}],
+        "context_concepts": [],
+        "baseline_concepts": [],
+        "queries": [
+            {
+                "query_id": "C1_exact_claim",
+                "purpose": "claim_exact",
+                "sources": ["semantic"],
+                "query": "ischemic stroke lightweight encoder",
+                "strictness": "medium",
+                "max_results_per_source": 5,
+                "claim_id": "C1",
+                "claim_query_type": "exact_claim_query",
+            }
+        ],
+    }
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del queries_by_source, max_results_per_source, year, timeout_seconds
+        return {"results": {"semantic": [{"title": "Lightweight encoder for ischemic stroke", "abstract": "ischemic stroke lightweight encoder"}]}}
+
+    monkeypatch.setattr("src.research_agent.novelty_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = run_novelty_search_plan(plan, "semantic", max_results_per_source=5)
+
+    assert result["candidates"][0]["matched_claim_ids"] == ["C1"]
+    assert result["candidates"][0]["claim_query_types"] == ["exact_claim_query"]
+
+
+def test_novelty_workflow_outputs_closest_prior_work_and_dimensions() -> None:
+    result = asyncio.run(
+        NoveltyCheckWorkflow(llm=CaptureNoveltyLLM()).run(
+            innovation_text="A lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT.",
+            references=[
+                {
+                    "title": "Lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT",
+                    "abstract": "ischemic stroke non-contrast CT lesion segmentation lightweight encoder",
+                    "source": "https://doi.org/10.1000/verified",
+                    "doi": "10.1000/verified",
+                    "candidate_status": "strong_candidate",
+                    "screening_status": "qualified",
+                    "verification_status": "verified",
+                    "matched_claim_ids": ["C1"],
+                    "matched_concepts": {"required": ["ischemic stroke", "non-contrast CT", "lesion segmentation"], "method": ["lightweight encoder"]},
+                }
+            ],
+            search_payload={"plan": {"claims": [{"claim_id": "C1", "claim": "claim"}]}},
+        )
+    )
+
+    assert result["comparisons"][0]["verification_status"] == "verified"
+    assert result["closest_prior_work"][0]["verification_status"] == "verified"
+    assert result["closest_prior_work"][0]["matched_claim_ids"] == ["C1"]
+    assert result["novelty_dimensions"]["method_novelty"]["risk"] in {"moderate", "high"}
+    assert "application_novelty" in result["novelty_dimensions"]
+    assert "combination_novelty" in result["novelty_dimensions"]
+
+
+def test_novelty_workflow_keeps_unverified_and_partial_with_downgraded_wording(monkeypatch) -> None:
+    monkeypatch.setattr("src.research_agent.novelty_check.NoveltyCheckWorkflow._can_use_llm", lambda self: False)
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow().run(
+            innovation_text="A lightweight encoder for ischemic stroke lesion segmentation on non-contrast CT.",
+            references=[
+                {
+                    "title": "Unverified lightweight encoder for ischemic stroke segmentation",
+                    "abstract": "ischemic stroke segmentation lightweight encoder",
+                    "verification_status": "unverified",
+                    "candidate_status": "strong_candidate",
+                },
+                {
+                    "title": "Partial metadata for CT segmentation",
+                    "abstract": "non-contrast CT lesion segmentation",
+                    "verification_status": "partial",
+                    "candidate_status": "weak_candidate",
+                },
+            ],
+            search_payload={},
+        )
+    )
+
+    statuses = {item["verification_status"] for item in result["comparisons"]}
+    assert {"unverified", "partial"} <= statuses
+    combined = " ".join(item["evidence"] + " " + item["recommendation"] for item in result["comparisons"])
+    assert "未通过稳定标识校验" in combined
+    assert "辅助线索" in combined
+
+
+def test_novelty_diagnostics_reports_source_failures(monkeypatch) -> None:
+    plan = {
+        "required_concepts": [{"term": "legal question answering", "type": "task", "must_keep": True}],
+        "method_concepts": [{"term": "retrieval augmented generation", "type": "method"}],
+        "context_concepts": [],
+        "baseline_concepts": [],
+        "queries": [
+            {
+                "query_id": "semantic_method_overlap",
+                "purpose": "method_overlap",
+                "sources": ["semantic", "openalex"],
+                "query": "legal RAG question answering hallucination",
+                "strictness": "medium",
+                "max_results_per_source": 5,
+            }
+        ],
+    }
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del max_results_per_source, year, timeout_seconds
+        source = next(iter(queries_by_source))
+        if source == "semantic":
+            raise RuntimeError("HTTP 429")
+        return {"results": {"openalex": []}}
+
+    monkeypatch.setattr("src.research_agent.novelty_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = run_novelty_search_plan(plan, "semantic,openalex", max_results_per_source=5)
+
+    assert result["diagnostics"]["source_summary"]["semantic"]["error"] == "HTTP 429"
+    assert any("Semantic Scholar failed" in warning for warning in result["diagnostics"]["warnings"])
 
 
 def test_search_papers_uses_source_specific_queries(monkeypatch) -> None:
@@ -323,6 +1515,1098 @@ def test_auto_search_mode_routes_obvious_society_topic(monkeypatch) -> None:
 
     assert plan["search_mode"] == "society"
     assert "education" in plan["backend_query"]
+
+
+def test_computer_search_mode_uses_cs_ai_query_plan(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        assert search_mode == "computer"
+        del query, requested_sources
+        return {
+            "search_query": "retrieval augmented generation legal question answering benchmark",
+            "pubmed_query": "",
+            "core_concepts": [
+                {"concept": "retrieval augmented generation", "type": "method", "must_keep": True},
+                {"concept": "legal question answering", "type": "task", "must_keep": True},
+                {"concept": "benchmark", "type": "benchmark", "must_keep": False},
+            ],
+            "synonyms": ["RAG", "legal QA"],
+            "recommended_sources": ["arxiv", "semantic", "openalex", "crossref"],
+            "avoid_sources": ["pubmed"],
+            "rationale": "This is a CS/AI retrieval and question-answering topic.",
+        }
+
+    calls = []
+
+    def fake_backend(query, *, sources, max_results_per_source, year, timeout_seconds):
+        del max_results_per_source, year, timeout_seconds
+        calls.append({"query": query, "sources": sources})
+        return {"results": {source: [] for source in sources}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend", fake_backend)
+
+    result = search_papers(
+        "法律问答中的检索增强生成基准",
+        sources="arxiv,semantic,pubmed",
+        max_results_per_source=1,
+        search_mode="computer",
+    )
+
+    assert result["search_mode"] == "computer"
+    assert result["query_plan"]["search_mode"] == "computer"
+    assert result["queries_by_source"]["pubmed"] == "retrieval augmented generation legal question answering benchmark"
+    assert calls == [
+        {"query": "retrieval augmented generation legal question answering benchmark", "sources": ["arxiv", "semantic", "pubmed"]},
+    ]
+
+
+def test_auto_search_mode_routes_ai_topic_to_computer(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+
+    plan = build_academic_search_plan("large language model retrieval augmented generation", ["arxiv"], search_mode="auto")
+
+    assert plan["search_mode"] == "computer"
+    assert "large language model" in plan["backend_query"]
+
+
+def test_auto_search_mode_routes_remote_sensing_change_detection_to_computer(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+
+    plan = build_academic_search_plan("遥感图像变化检测中的孪生网络", ["arxiv"], search_mode="auto")
+
+    assert plan["search_mode"] == "computer"
+    assert "remote sensing" in plan["backend_query"]
+    assert "change detection" in plan["backend_query"]
+    assert "siamese network" in plan["backend_query"]
+
+
+def test_auto_search_mode_uses_llm_classifier_before_rules(monkeypatch) -> None:
+    llm = StaticRelevanceLLM(
+        json.dumps(
+            {
+                "search_mode": "computer",
+                "confidence": 0.91,
+                "rationale": "The topic is a computer-science literature search.",
+            }
+        )
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("PAPER_SEARCH_MODE_INFERENCE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr("src.research_agent.paper_search.LLMClient", lambda: llm)
+
+    plan = build_academic_search_plan("new benchmark for code generation agents", ["arxiv"], search_mode="auto")
+
+    assert plan["search_mode"] == "computer"
+    assert plan["mode_inference_status"] == "llm"
+    assert plan["mode_inference_confidence"] == "0.91"
+    assert "computer-science" in plan["mode_inference_rationale"]
+    assert "classify" in llm.calls[0]["system_prompt"].casefold()
+
+
+def test_auto_query_planner_returns_search_mode_and_query_in_one_llm_step(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        assert query == "attention is all you need"
+        assert requested_sources == ["arxiv", "pubmed"]
+        assert search_mode == "auto"
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.96,
+            "search_query": "attention is all you need",
+            "pubmed_query": "",
+            "core_concepts": [
+                {"concept": "Transformer", "type": "model", "must_keep": True},
+                {"concept": "self-attention", "type": "method", "must_keep": True},
+            ],
+            "synonyms": ["Transformer", "self-attention"],
+            "recommended_sources": ["arxiv", "semantic", "crossref"],
+            "avoid_sources": ["pubmed"],
+            "rationale": "Exact paper title in computer science.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.classify_search_mode_with_llm",
+        lambda query: (_ for _ in ()).throw(AssertionError("separate classifier should not be called")),
+    )
+
+    plan = build_academic_search_plan("attention is all you need", ["arxiv", "pubmed"], search_mode="auto")
+
+    assert plan["search_mode"] == "computer"
+    assert plan["mode_inference_status"] == "llm"
+    assert plan["mode_inference_confidence"] == "0.96"
+    assert plan["rewrite_status"] == "llm"
+    assert plan["backend_query"] == "attention is all you need"
+    assert plan["queries_by_source"]["arxiv"] == "attention is all you need"
+
+
+def test_query_planner_intent_feeds_recall_without_separate_intent_llm(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        assert query == "attention is all you need"
+        assert requested_sources == ["arxiv", "semantic"]
+        assert search_mode == "auto"
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.96,
+            "query_intent": "title",
+            "intent_confidence": 0.94,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": [],
+                "year": "",
+                "venue": "",
+                "method_terms": [],
+                "task_terms": [],
+            },
+            "search_query": "attention is all you need",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "synonyms": ["Transformer"],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Exact paper title in computer science.",
+        }
+
+    def fail_intent_llm(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("separate intent classifier should not be called")
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_INTENT_PREDICTION", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.classify_query_intent_with_llm", fail_intent_llm)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_exact_title_search_by_source",
+        lambda *args, **kwargs: {"results": {"arxiv": [], "semantic": []}},
+    )
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {"results": {"arxiv": [], "semantic": []}},
+    )
+
+    result = search_papers("attention is all you need", sources="arxiv,semantic", max_results_per_source=2, search_mode="auto")
+
+    assert result["query_plan"]["intent"]["intent_source"] == "llm_planner"
+    assert result["query_plan"]["intent"]["template"] == "title"
+    assert result["query_plan"]["query_intent"] == "title"
+    assert result["query_plan"]["intent_scores"]["title"] == 0.94
+    assert [channel["name"] for channel in result["query_plan"]["recall_channels"]] == ["exact_title", "topic"]
+
+
+def test_intent_search_contracts_cover_known_intents_only() -> None:
+    expected_intents = {
+        "title",
+        "author",
+        "author+title",
+        "citation",
+        "citation_with_title_author",
+        "topic",
+        "method_task",
+        "abstract",
+    }
+    required_fields = {
+        "allowed_channels",
+        "forbid_channels",
+        "primary_channel",
+        "query_fields",
+        "validation_fields",
+        "fallback_channel",
+    }
+
+    assert set(paper_search.INTENT_SEARCH_CONTRACTS) == expected_intents
+    for intent, contract in paper_search.INTENT_SEARCH_CONTRACTS.items():
+        assert set(contract) >= required_fields
+        assert contract["primary_channel"] in contract["allowed_channels"]
+        assert contract["fallback_channel"] in contract["allowed_channels"]
+        assert not (set(contract["allowed_channels"]) & set(contract["forbid_channels"])), intent
+
+    assert paper_search.allowed_channels_for_intent("citation") == ("citation", "exact_title", "author")
+    assert paper_search.allowed_channels_for_intent("citation_with_title_author") == (
+        "citation",
+        "exact_title",
+        "author",
+        "fuzzy_title",
+    )
+    assert paper_search.allowed_channels_for_intent("unknown_intent") == ("topic",)
+    assert paper_search.allowed_channels_for_intent("") == ("topic",)
+
+
+def test_query_planner_channel_queries_feed_contract_without_mixing(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        assert query == "attention is all you need"
+        assert requested_sources == ["arxiv", "semantic"]
+        assert search_mode == "auto"
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.96,
+            "query_intent": "title",
+            "intent_confidence": 0.94,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": [],
+                "year": "",
+                "venue": "",
+                "identifiers": {"doi": "", "pmid": "", "arxiv_id": "1706.03762"},
+                "method_terms": ["Transformer"],
+                "task_terms": ["machine translation"],
+                "domain_terms": ["natural language processing"],
+            },
+            "channel_queries": {
+                "exact_title": "Attention Is All You Need",
+                "topic": "transformer self-attention neural machine translation",
+                "author": "",
+                "citation": "",
+                "method_task": "",
+                "abstract_claim": "",
+            },
+            "search_query": "transformer self-attention neural machine translation",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "must_match_concepts": ["Transformer"],
+            "do_not_mix": ["Do not add authors or topic terms to exact_title"],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Exact paper title with a separate topic fallback.",
+        }
+
+    def fail_intent_llm(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("separate intent classifier should not be called")
+
+    exact_calls = []
+
+    def fake_exact_title(title, sources, *, max_results_per_source):
+        del max_results_per_source
+        exact_calls.append((title, tuple(sources)))
+        return {"results": {"arxiv": [], "semantic": []}}
+
+    backend_calls = []
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del max_results_per_source, year, timeout_seconds
+        backend_calls.append(dict(queries_by_source))
+        return {"results": {"arxiv": [], "semantic": []}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_INTENT_PREDICTION", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.classify_query_intent_with_llm", fail_intent_llm)
+    monkeypatch.setattr("src.research_agent.paper_search.run_exact_title_search_by_source", fake_exact_title)
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = search_papers("attention is all you need", sources="arxiv,semantic", max_results_per_source=2, search_mode="auto")
+
+    assert result["query_plan"]["channel_queries"]["exact_title"] == "Attention Is All You Need"
+    assert result["query_plan"]["extracted"]["identifiers"]["arxiv_id"] == "1706.03762"
+    assert result["query_plan"]["extracted"]["domain_terms"] == ["natural language processing"]
+    assert result["query_plan"]["must_match_concepts"] == ["Transformer"]
+    assert result["query_plan"]["do_not_mix"] == ["Do not add authors or topic terms to exact_title"]
+    assert exact_calls[0] == ("Attention Is All You Need", ("arxiv", "semantic"))
+    assert backend_calls == [{"arxiv": "transformer self-attention neural machine translation", "semantic": "transformer self-attention neural machine translation"}]
+    assert [channel["name"] for channel in result["query_plan"]["recall_channels"]] == ["exact_title", "topic"]
+
+
+def test_query_planner_normalizes_legacy_author_title_plan_into_channel_queries(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.94,
+            "query_intent": "author+title",
+            "intent_confidence": 0.91,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Ashish Vaswani"],
+                "year": "2017",
+                "venue": "NeurIPS",
+            },
+            "search_query": "Attention Is All You Need Ashish Vaswani 2017",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Legacy plan without channel_queries.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("Attention Is All You Need Ashish Vaswani", ["arxiv"], search_mode="auto")
+
+    assert plan["rewrite_status"] == "llm"
+    assert plan["channel_queries"]["exact_title"] == "Attention Is All You Need"
+    assert plan["channel_queries"]["author"] == "Ashish Vaswani"
+    assert "Ashish Vaswani" not in plan["channel_queries"]["exact_title"]
+    assert plan["extracted"]["method_terms"] == []
+    assert plan["extracted"]["task_terms"] == []
+    assert plan["extracted"]["domain_terms"] == []
+    assert plan["extracted"]["identifiers"] == {"doi": "", "pmid": "", "arxiv_id": ""}
+
+
+def test_query_planner_normalizes_citation_channel_to_stable_identifier_first(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.94,
+            "query_intent": "citation",
+            "intent_confidence": 0.91,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Ashish Vaswani"],
+                "year": "2017",
+                "venue": "NeurIPS",
+                "identifiers": {"doi": "10.48550/arXiv.1706.03762"},
+            },
+            "search_query": "Attention Is All You Need Ashish Vaswani 2017",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["crossref"],
+            "avoid_sources": [],
+            "rationale": "Citation plan with DOI.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan(
+        "Vaswani et al. 2017 Attention Is All You Need doi:10.48550/arXiv.1706.03762",
+        ["crossref"],
+        search_mode="auto",
+    )
+
+    assert plan["rewrite_status"] == "llm"
+    assert plan["channel_queries"]["citation"] == "10.48550/arXiv.1706.03762"
+    assert plan["channel_queries"]["exact_title"] == "Attention Is All You Need"
+
+
+def test_recall_channels_use_channel_specific_queries(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.94,
+            "query_intent": "author+title",
+            "intent_confidence": 0.93,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Ashish Vaswani"],
+                "year": "2017",
+                "venue": "NeurIPS",
+            },
+            "search_query": "Attention Is All You Need Ashish Vaswani transformer",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Specific title and author.",
+        }
+
+    exact_calls = []
+    backend_calls = []
+
+    def fake_exact_title(title, sources, *, max_results_per_source):
+        del max_results_per_source
+        exact_calls.append((title, tuple(sources)))
+        return {"results": {"arxiv": [], "semantic": []}}
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del max_results_per_source, year, timeout_seconds
+        backend_calls.append(dict(queries_by_source))
+        return {"results": {"arxiv": [], "semantic": []}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.run_exact_title_search_by_source", fake_exact_title)
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = search_papers("Attention Is All You Need Ashish Vaswani", sources="arxiv,semantic", max_results_per_source=2, search_mode="auto")
+
+    assert exact_calls[0] == ("Attention Is All You Need", ("arxiv", "semantic"))
+    author_channels = [
+        channel for channel in result["query_plan"]["recall_channels"]
+        if channel["name"] == "author"
+    ]
+    assert author_channels
+    assert author_channels[0]["queries_by_source"]["arxiv"] == "au:Ashish AND au:Vaswani"
+    assert author_channels[0]["queries_by_source"]["semantic"] == "Ashish Vaswani"
+    assert "Transformer" not in author_channels[0]["queries_by_source"]["arxiv"]
+    assert all("Ashish Vaswani" not in channel["queries_by_source"].get("arxiv", "") for channel in result["query_plan"]["recall_channels"] if channel["name"] == "exact_title")
+
+
+def test_recall_citation_channel_prefers_doi_query(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.94,
+            "query_intent": "citation",
+            "intent_confidence": 0.92,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Vaswani"],
+                "year": "2017",
+                "venue": "NeurIPS",
+                "identifiers": {"doi": "10.48550/arXiv.1706.03762"},
+            },
+            "search_query": "Vaswani 2017 Attention Is All You Need",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["crossref"],
+            "avoid_sources": [],
+            "rationale": "Citation with DOI.",
+        }
+
+    backend_calls = []
+
+    def fake_backend(queries_by_source, *, max_results_per_source, year, timeout_seconds):
+        del max_results_per_source, year, timeout_seconds
+        backend_calls.append(dict(queries_by_source))
+        return {"results": {"crossref": []}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.run_exact_title_search_by_source", lambda *args, **kwargs: {"results": {"crossref": []}})
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend_by_source", fake_backend)
+
+    result = search_papers(
+        "Vaswani et al. 2017 Attention Is All You Need",
+        sources="crossref",
+        max_results_per_source=2,
+        search_mode="auto",
+    )
+
+    citation_channels = [channel for channel in result["query_plan"]["recall_channels"] if channel["name"] == "citation"]
+    assert citation_channels
+    assert citation_channels[0]["queries_by_source"]["crossref"] == "10.48550/arXiv.1706.03762"
+    assert {"crossref": "10.48550/arXiv.1706.03762"} in backend_calls
+
+
+def test_recall_method_task_and_abstract_use_channel_specific_short_queries(monkeypatch) -> None:
+    cases = [
+        (
+            "method_task",
+            "RAG for legal question answering benchmark",
+            {
+                "query_intent": "method_task",
+                "intent_confidence": 0.91,
+                "extracted": {
+                    "method_terms": ["retrieval augmented generation"],
+                    "task_terms": ["legal question answering benchmark"],
+                    "domain_terms": ["legal"],
+                },
+                "channel_queries": {"method_task": "retrieval augmented generation legal question answering benchmark"},
+                "search_query": "large language models",
+                "core_concepts": [{"concept": "retrieval augmented generation", "type": "method", "must_keep": True}],
+            },
+            "method_task",
+            ["retrieval augmented generation", "legal question answering benchmark"],
+        ),
+        (
+            "abstract",
+            " ".join(["This study proposes a lightweight segmentation model for ischemic stroke CT images."] * 12),
+            {
+                "query_intent": "abstract",
+                "intent_confidence": 0.9,
+                "extracted": {
+                    "method_terms": ["lightweight segmentation model"],
+                    "task_terms": ["ischemic stroke CT segmentation"],
+                    "domain_terms": ["ischemic stroke CT"],
+                },
+                "channel_queries": {"abstract_claim": "lightweight segmentation model ischemic stroke CT segmentation"},
+                "search_query": " ".join(["This study proposes a lightweight segmentation model for ischemic stroke CT images."] * 12)[:320],
+                "core_concepts": [{"concept": "ischemic stroke CT segmentation", "type": "task", "must_keep": True}],
+                "recommended_sources": ["pubmed", "crossref"],
+            },
+            "abstract_claim",
+            ["lightweight segmentation model", "ischemic stroke CT segmentation"],
+        ),
+    ]
+
+    for intent, query, payload, channel_name, expected_terms in cases:
+        async def fake_llm_plan(input_query, requested_sources, *, search_mode="auto", plan_payload=payload):
+            del input_query, requested_sources, search_mode
+            return {
+                "search_mode": "computer" if intent == "method_task" else "biomedical",
+                "search_mode_confidence": 0.9,
+                "pubmed_query": "",
+                "recommended_sources": plan_payload.get("recommended_sources", ["arxiv"]),
+                "avoid_sources": [],
+                "rationale": f"{intent} query.",
+                **plan_payload,
+            }
+
+        monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+        monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+        source = "arxiv" if intent == "method_task" else "crossref"
+        monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend_by_source", lambda *args, source=source, **kwargs: {"results": {source: []}})
+
+        result = search_papers(query, sources=source, max_results_per_source=2, search_mode="auto")
+        channels = [channel for channel in result["query_plan"]["recall_channels"] if channel["name"] == channel_name]
+        assert channels
+        routed_query = channels[0]["queries_by_source"][source]
+        assert all(term in routed_query for term in expected_terms)
+        if channel_name == "abstract_claim":
+            assert len(routed_query) < 220
+            assert len(routed_query) < len(query)
+
+
+def test_query_planner_title_fallback_uses_extracted_title_over_broadened_search_query(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.96,
+            "query_intent": "title",
+            "intent_confidence": 0.94,
+            "extracted": {"title": "Attention Is All You Need", "authors": [], "year": "", "venue": ""},
+            "search_query": "transformer architecture neural machine translation",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Incorrectly broadened exact title.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("attention is all you need", ["arxiv"], search_mode="auto")
+
+    assert plan["rewrite_status"] == "llm"
+    assert plan["llm_search_query"] == "transformer architecture neural machine translation"
+    assert plan["channel_queries"]["exact_title"] == "Attention Is All You Need"
+    assert plan["channel_queries"]["topic"] == "transformer architecture neural machine translation"
+
+
+def test_query_planner_title_guardrail_rejects_broadened_exact_title_channel(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.96,
+            "query_intent": "title",
+            "intent_confidence": 0.94,
+            "extracted": {"title": "Attention Is All You Need", "authors": [], "year": "", "venue": ""},
+            "channel_queries": {"exact_title": "transformer architecture neural machine translation"},
+            "search_query": "transformer architecture neural machine translation",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Incorrectly broadened exact title channel.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("attention is all you need", ["arxiv"], search_mode="auto")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:title_query_broadened"
+    assert plan["backend_query"] == plan["rules_fallback_query"]
+
+
+def test_query_planner_author_guardrail_rejects_query_without_author(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "author",
+            "intent_confidence": 0.91,
+            "extracted": {"authors": ["Ashish Vaswani"], "title": "", "year": "", "venue": ""},
+            "channel_queries": {"author": "transformer attention neural machine translation"},
+            "search_query": "transformer attention neural machine translation",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Incorrectly dropped the author name.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("Ashish Vaswani", ["arxiv"], search_mode="computer")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:author_query_missing_author"
+    assert plan["backend_query"] == plan["rules_fallback_query"]
+
+
+def test_query_planner_author_guardrail_rejects_exact_title_channel(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "author",
+            "intent_confidence": 0.91,
+            "extracted": {"authors": ["Ashish Vaswani"], "title": "", "year": "", "venue": ""},
+            "channel_queries": {"exact_title": "Ashish Vaswani", "author": "Ashish Vaswani"},
+            "search_query": "Ashish Vaswani",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["arxiv"],
+            "avoid_sources": [],
+            "rationale": "Author names should not open exact-title recall.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("Ashish Vaswani", ["arxiv"], search_mode="computer")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:author_exact_title_channel_forbidden"
+
+
+def test_query_planner_author_title_guardrail_rejects_author_in_exact_title(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "author+title",
+            "intent_confidence": 0.93,
+            "extracted": {"title": "Attention Is All You Need", "authors": ["Ashish Vaswani"], "year": "2017", "venue": ""},
+            "channel_queries": {
+                "exact_title": "Attention Is All You Need Ashish Vaswani",
+                "author": "Ashish Vaswani",
+            },
+            "search_query": "Attention Is All You Need Ashish Vaswani",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["arxiv"],
+            "avoid_sources": [],
+            "rationale": "Author was incorrectly mixed into exact-title query.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("Attention Is All You Need Ashish Vaswani", ["arxiv"], search_mode="computer")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:exact_title_contains_author"
+
+
+def test_query_planner_citation_guardrail_rejects_dropped_year(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "citation",
+            "intent_confidence": 0.9,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Vaswani"],
+                "year": "2017",
+                "venue": "NeurIPS",
+            },
+            "channel_queries": {"citation": "attention is all you need transformer"},
+            "search_query": "attention is all you need transformer",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv", "semantic"],
+            "avoid_sources": [],
+            "rationale": "Incorrectly dropped the citation year.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("Vaswani et al., 2017, Attention Is All You Need", ["arxiv"], search_mode="computer")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:citation_year_dropped"
+    assert plan["backend_query"] == plan["rules_fallback_query"]
+
+
+def test_query_planner_citation_guardrail_rejects_dropped_identifier(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "citation",
+            "intent_confidence": 0.9,
+            "extracted": {
+                "title": "Attention Is All You Need",
+                "authors": ["Vaswani"],
+                "year": "2017",
+                "venue": "NeurIPS",
+                "identifiers": {"doi": "10.48550/arXiv.1706.03762"},
+            },
+            "channel_queries": {"citation": "Vaswani 2017 Attention Is All You Need"},
+            "search_query": "Vaswani 2017 Attention Is All You Need",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["crossref"],
+            "avoid_sources": [],
+            "rationale": "DOI was dropped from citation query.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan(
+        "Vaswani et al. 2017 Attention Is All You Need doi:10.48550/arXiv.1706.03762",
+        ["crossref"],
+        search_mode="computer",
+    )
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:citation_identifier_dropped"
+
+
+def test_query_planner_abstract_guardrail_rejects_overlong_query(monkeypatch) -> None:
+    long_input = " ".join(["This study proposes a lightweight segmentation model for ischemic stroke CT images."] * 12)
+
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del requested_sources, search_mode
+        return {
+            "search_mode": "biomedical",
+            "query_intent": "abstract",
+            "intent_confidence": 0.88,
+            "extracted": {"method_terms": ["lightweight segmentation model"], "task_terms": ["ischemic stroke CT segmentation"]},
+            "channel_queries": {"abstract_claim": query[:320]},
+            "search_query": query[:320],
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "ischemic stroke CT segmentation", "type": "task", "must_keep": True}],
+            "recommended_sources": ["pubmed", "crossref"],
+            "avoid_sources": [],
+            "rationale": "Incorrectly reused too much of the abstract.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan(long_input, ["pubmed"], search_mode="biomedical")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:abstract_query_too_long"
+    assert plan["backend_query"] == plan["rules_fallback_query"]
+
+
+def test_query_planner_method_task_guardrail_rejects_missing_task(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "method_task",
+            "intent_confidence": 0.9,
+            "extracted": {
+                "method_terms": ["retrieval augmented generation"],
+                "task_terms": ["legal question answering benchmark"],
+                "domain_terms": ["legal"],
+            },
+            "channel_queries": {"method_task": "retrieval augmented generation large language models"},
+            "search_query": "retrieval augmented generation large language models",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "retrieval augmented generation", "type": "method", "must_keep": True}],
+            "recommended_sources": ["arxiv"],
+            "avoid_sources": [],
+            "rationale": "Task was dropped from method-task query.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("RAG for legal question answering benchmark", ["arxiv"], search_mode="computer")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:method_task_query_missing_task"
+
+
+def test_query_planner_abstract_guardrail_requires_core_concepts(monkeypatch) -> None:
+    long_input = " ".join(["This study proposes a lightweight segmentation model for ischemic stroke CT images."] * 12)
+
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "biomedical",
+            "query_intent": "abstract",
+            "intent_confidence": 0.88,
+            "extracted": {"method_terms": [], "task_terms": [], "domain_terms": []},
+            "channel_queries": {"abstract_claim": "lightweight segmentation"},
+            "search_query": "lightweight segmentation",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "must_match_concepts": [],
+            "recommended_sources": ["pubmed"],
+            "avoid_sources": [],
+            "rationale": "No core concepts were extracted.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan(long_input, ["pubmed"], search_mode="biomedical")
+
+    assert plan["rewrite_status"] == "rules_fallback:llm_guardrail:abstract_missing_core_concepts"
+
+
+def test_query_planner_low_confidence_intent_is_not_adopted(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.92,
+            "query_intent": "title",
+            "intent_confidence": 0.34,
+            "extracted": {"title": "Attention Is All You Need", "authors": [], "year": "", "venue": ""},
+            "search_query": "attention is all you need",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv"],
+            "avoid_sources": [],
+            "rationale": "Low-confidence intent should not drive recall weights.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+
+    plan = build_academic_search_plan("attention is all you need", ["arxiv"], search_mode="auto")
+
+    assert plan["rewrite_status"] == "llm"
+    assert plan["backend_query"] == "attention is all you need"
+    assert plan["intent"] == {}
+    assert plan["intent_scores"] == {}
+    assert plan["query_intent"] == ""
+
+
+def test_query_planner_low_confidence_channel_query_does_not_drive_exact_title(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "search_mode_confidence": 0.92,
+            "query_intent": "title",
+            "intent_confidence": 0.34,
+            "extracted": {"title": "Attention Is All You Need", "authors": [], "year": "", "venue": ""},
+            "channel_queries": {"exact_title": "Attention Is All You Need"},
+            "search_query": "transformer attention neural machine translation",
+            "pubmed_query": "",
+            "core_concepts": [{"concept": "Transformer", "type": "model", "must_keep": True}],
+            "recommended_sources": ["arxiv"],
+            "avoid_sources": [],
+            "rationale": "Low-confidence exact-title guess should not open a dedicated channel.",
+        }
+
+    def fail_exact_title(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("low-confidence planner channel should not run exact-title recall")
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_INTENT_PREDICTION", "false")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.run_exact_title_search_by_source", fail_exact_title)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {"results": {"arxiv": []}},
+    )
+
+    result = search_papers(
+        "transformer attention neural machine translation",
+        sources="arxiv",
+        max_results_per_source=2,
+        search_mode="auto",
+    )
+
+    assert "exact_title" not in [channel["name"] for channel in result["query_plan"]["recall_channels"]]
+    assert result["query_plan"]["query_intent"] == "method_task"
+    assert result["query_plan"]["opened_channels"] == ["topic"]
+    assert "exact_title" in result["query_plan"]["forbidden_channels"]
+    assert result["query_plan"]["channel_filter_reasons"]
+
+
+def test_author_intent_contract_does_not_open_exact_title(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        del query, requested_sources, search_mode
+        return {
+            "search_mode": "computer",
+            "query_intent": "author",
+            "intent_confidence": 0.92,
+            "extracted": {"authors": ["Ashish Vaswani"], "title": "", "year": "", "venue": ""},
+            "channel_queries": {"author": "Ashish Vaswani"},
+            "search_query": "Ashish Vaswani",
+            "pubmed_query": "",
+            "core_concepts": [],
+            "recommended_sources": ["arxiv"],
+            "avoid_sources": [],
+            "rationale": "Author lookup.",
+        }
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_exact_title_search_by_source",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("author intent must not open exact_title")),
+    )
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.run_paper_search_backend_by_source",
+        lambda *args, **kwargs: {"results": {"arxiv": []}},
+    )
+
+    result = search_papers("Ashish Vaswani", sources="arxiv", max_results_per_source=2, search_mode="computer")
+
+    channel_names = [channel["name"] for channel in result["query_plan"]["recall_channels"]]
+    assert "exact_title" not in channel_names
+    assert result["query_plan"]["opened_channels"] == channel_names
+    assert "exact_title" in result["query_plan"]["forbidden_channels"]
+
+
+def test_topic_method_and_abstract_contracts_do_not_open_exact_title(monkeypatch) -> None:
+    plans = [
+        (
+            "topic",
+            "large language models for legal question answering",
+            {
+                "query_intent": "topic",
+                "intent_confidence": 0.9,
+                "extracted": {"domain_terms": ["legal question answering"]},
+                "channel_queries": {
+                    "topic": "large language models legal question answering",
+                    "exact_title": "Large Language Models for Legal Question Answering",
+                },
+                "search_query": "large language models legal question answering",
+                "core_concepts": [{"concept": "legal question answering", "type": "task", "must_keep": True}],
+            },
+        ),
+        (
+            "method_task",
+            "RAG for legal question answering benchmark",
+            {
+                "query_intent": "method_task",
+                "intent_confidence": 0.9,
+                "extracted": {
+                    "method_terms": ["retrieval augmented generation"],
+                    "task_terms": ["legal question answering benchmark"],
+                    "domain_terms": ["legal"],
+                },
+                "channel_queries": {
+                    "method_task": "retrieval augmented generation legal question answering benchmark",
+                    "exact_title": "RAG for Legal Question Answering Benchmark",
+                },
+                "search_query": "retrieval augmented generation legal question answering benchmark",
+                "core_concepts": [{"concept": "retrieval augmented generation", "type": "method", "must_keep": True}],
+            },
+        ),
+        (
+            "abstract",
+            " ".join(["This study proposes a lightweight segmentation model for ischemic stroke CT images."] * 12),
+            {
+                "query_intent": "abstract",
+                "intent_confidence": 0.9,
+                "extracted": {
+                    "method_terms": ["lightweight segmentation model"],
+                    "task_terms": ["ischemic stroke CT segmentation"],
+                    "domain_terms": ["ischemic stroke CT"],
+                },
+                "channel_queries": {
+                    "abstract_claim": "lightweight segmentation model ischemic stroke CT segmentation",
+                    "exact_title": "Lightweight Segmentation Model for Ischemic Stroke CT Images",
+                },
+                "search_query": "lightweight segmentation model ischemic stroke CT segmentation",
+                "core_concepts": [{"concept": "ischemic stroke CT segmentation", "type": "task", "must_keep": True}],
+            },
+        ),
+    ]
+
+    for intent, query, llm_payload in plans:
+        async def fake_llm_plan(input_query, requested_sources, *, search_mode="auto", payload=llm_payload):
+            del input_query, requested_sources, search_mode
+            return {
+                "search_mode": "computer" if intent != "abstract" else "biomedical",
+                "search_mode_confidence": 0.9,
+                "pubmed_query": "",
+                "recommended_sources": ["arxiv"],
+                "avoid_sources": [],
+                "rationale": f"{intent} lookup.",
+                **payload,
+            }
+
+        monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+        monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+        monkeypatch.setattr(
+            "src.research_agent.paper_search.run_exact_title_search_by_source",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError(f"{intent} intent must not open exact_title")),
+        )
+        monkeypatch.setattr(
+            "src.research_agent.paper_search.run_paper_search_backend_by_source",
+            lambda *args, **kwargs: {"results": {"arxiv": []}},
+        )
+
+        result = search_papers(query, sources="arxiv", max_results_per_source=2, search_mode="auto")
+        channel_names = [channel["name"] for channel in result["query_plan"]["recall_channels"]]
+        assert "exact_title" not in channel_names
+        assert result["query_plan"]["opened_channels"] == channel_names
+        assert "exact_title" in result["query_plan"]["forbidden_channels"]
+
+
+def test_auto_search_mode_falls_back_to_rules_when_llm_classifier_fails(monkeypatch) -> None:
+    llm = StaticRelevanceLLM("not json")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("PAPER_SEARCH_MODE_INFERENCE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr("src.research_agent.paper_search.LLMClient", lambda: llm)
+
+    plan = build_academic_search_plan("large language model retrieval augmented generation", ["arxiv"], search_mode="auto")
+
+    assert plan["search_mode"] == "computer"
+    assert plan["mode_inference_status"] == "rules_fallback:llm"
+    assert "JSONDecodeError" in plan["mode_inference_error"] or "ValueError" in plan["mode_inference_error"]
+
+
+def test_manual_search_mode_skips_llm_classifier(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("PAPER_SEARCH_MODE_INFERENCE", "true")
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "false")
+    monkeypatch.setattr(
+        "src.research_agent.paper_search.LLMClient",
+        lambda: (_ for _ in ()).throw(AssertionError("LLM classifier should not be called")),
+    )
+
+    plan = build_academic_search_plan("large language model retrieval augmented generation", ["arxiv"], search_mode="biomedical")
+
+    assert plan["search_mode"] == "biomedical"
+    assert plan["mode_inference_status"] == "manual"
+
+
+def test_engineering_search_mode_uses_engineering_query_plan(monkeypatch) -> None:
+    async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
+        assert search_mode == "engineering"
+        del query, requested_sources
+        return {
+            "search_query": "lithium-ion battery thermal runaway prediction",
+            "pubmed_query": "",
+            "core_concepts": [
+                {"concept": "lithium-ion battery", "type": "system", "must_keep": True},
+                {"concept": "thermal runaway prediction", "type": "method", "must_keep": True},
+            ],
+            "synonyms": ["Li-ion battery", "thermal runaway"],
+            "recommended_sources": ["crossref", "openalex", "semantic", "arxiv"],
+            "avoid_sources": ["pubmed"],
+            "rationale": "This is an engineering battery safety prediction topic.",
+        }
+
+    calls = []
+
+    def fake_backend(query, *, sources, max_results_per_source, year, timeout_seconds):
+        del max_results_per_source, year, timeout_seconds
+        calls.append({"query": query, "sources": sources})
+        return {"results": {source: [] for source in sources}}
+
+    monkeypatch.setenv("PAPER_SEARCH_QUERY_REWRITE", "true")
+    monkeypatch.setattr("src.research_agent.paper_search.build_academic_search_plan_with_llm", fake_llm_plan)
+    monkeypatch.setattr("src.research_agent.paper_search.run_paper_search_backend", fake_backend)
+
+    result = search_papers("锂电池热失控预测", sources="crossref,openalex", max_results_per_source=1, search_mode="engineering")
+
+    assert result["search_mode"] == "engineering"
+    assert result["query_plan"]["search_mode"] == "engineering"
+    assert calls == [
+        {"query": "lithium-ion battery thermal runaway prediction", "sources": ["crossref", "openalex"]},
+    ]
 
 
 def test_biomedical_llm_query_rewrite_keeps_required_concepts_and_sources(monkeypatch) -> None:
@@ -527,6 +2811,214 @@ def test_topic_relevance_gate_keeps_stroke_ncct_segmentation_paper() -> None:
 
     assert assessed["topic_relevance_status"] == "relevant"
     assert assessed["topic_relevance_score"] >= 0.8
+
+
+def test_title_intent_exact_match_bypasses_topic_concept_gate(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Attention Is All You Need",
+                    "arxiv_id": "1706.03762",
+                    "source": "https://arxiv.org/abs/1706.03762",
+                    "authors": "Ashish Vaswani, Noam Shazeer, Niki Parmar",
+                    "year": "2017",
+                    "abstract": (
+                        "The dominant sequence transduction models are based on recurrent or convolutional "
+                        "neural networks. We propose the Transformer, based solely on attention mechanisms."
+                    ),
+                    "retrieval_channel": "exact_title",
+                }
+            )
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+    query_plan = {
+        "search_mode": "computer",
+        "query_intent": "title",
+        "intent": {
+            "top_intent": "title",
+            "template": "title",
+            "scores": {"title": 0.94},
+            "extracted": {"title": "Attention Is All You Need"},
+        },
+        "backend_query": "attention is all you need",
+        "core_concepts": [
+            {"concept": "self-attention", "type": "method", "must_keep": True},
+            {"concept": "multi-head attention", "type": "method", "must_keep": True},
+        ],
+    }
+
+    gated = apply_relevance_gate("attention is all you need", screened, query_plan=query_plan)
+
+    assert [item["title"] for item in gated["qualified"]] == ["Attention Is All You Need"]
+    assert gated["qualified"][0]["topic_relevance_status"] == "relevant"
+    assert "exact_title_match" in gated["qualified"][0]["topic_relevance_reasons"]
+    assert gated["rejected"] == []
+
+
+def test_author_title_identity_relevance_bypasses_missing_topic_concepts(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Attention Is All You Need",
+                    "arxiv_id": "1706.03762",
+                    "source": "https://arxiv.org/abs/1706.03762",
+                    "authors": "Ashish Vaswani, Noam Shazeer",
+                    "year": "2017",
+                    "abstract": "We propose the Transformer.",
+                    "retrieval_channel": "canonical_repair",
+                }
+            )
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+    query_plan = {
+        "search_mode": "computer",
+        "query_intent": "author+title",
+        "bibliographic_identity": {
+            "query_intent": "author+title",
+            "title": "Attention Is All You Need",
+            "authors": ["Ashish Vaswani"],
+            "year": "2017",
+        },
+        "extracted": {"title": "Attention Is All You Need", "authors": ["Ashish Vaswani"], "year": "2017"},
+        "core_concepts": [{"concept": "multi-head attention benchmark", "type": "method", "must_keep": True}],
+    }
+
+    gated = apply_relevance_gate("attention is all you needs Ashish Vaswani", screened, query_plan=query_plan)
+
+    assert [item["title"] for item in gated["qualified"]] == ["Attention Is All You Need"]
+    assert gated["qualified"][0]["topic_relevance_status"] == "relevant"
+    assert gated["rejected"] == []
+
+
+def test_title_intent_typo_still_accepts_strong_title_match(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Attention Is All You Need",
+                    "arxiv_id": "1706.03762",
+                    "source": "https://arxiv.org/abs/1706.03762",
+                    "authors": "Ashish Vaswani",
+                    "year": "2017",
+                    "abstract": "We propose the Transformer.",
+                    "retrieval_channel": "fuzzy_title",
+                }
+            )
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+    query_plan = {
+        "search_mode": "computer",
+        "query_intent": "title",
+        "intent": {"top_intent": "title", "template": "title", "scores": {"title": 0.9}},
+        "backend_query": "attension is all you need",
+        "core_concepts": [{"concept": "self-attention", "type": "method", "must_keep": True}],
+    }
+
+    gated = apply_relevance_gate("attension is all you need", screened, query_plan=query_plan)
+
+    assert [item["title"] for item in gated["qualified"]] == ["Attention Is All You Need"]
+    assert gated["qualified"][0]["topic_relevance_status"] == "relevant"
+    assert gated["rejected"] == []
+
+
+def test_title_intent_near_match_falls_back_to_review_without_llm(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Attention Is Almost All You Need",
+                    "arxiv_id": "1706.99999",
+                    "source": "https://arxiv.org/abs/1706.99999",
+                    "authors": "Ada Lovelace",
+                    "year": "2018",
+                    "abstract": "A related attention paper.",
+                    "retrieval_channel": "fuzzy_title",
+                }
+            )
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+    query_plan = {
+        "search_mode": "computer",
+        "query_intent": "title",
+        "intent": {"top_intent": "title", "template": "title", "scores": {"title": 0.9}},
+        "backend_query": "attention is all you need",
+        "core_concepts": [{"concept": "self-attention", "type": "method", "must_keep": True}],
+    }
+
+    gated = apply_relevance_gate("attention is all you need", screened, query_plan=query_plan)
+
+    assert gated["qualified"] == []
+    assert [item["title"] for item in gated["needs_review"]] == ["Attention Is Almost All You Need"]
+    assert gated["needs_review"][0]["topic_relevance_status"] == "borderline"
+    assert "title_intent_needs_review" in gated["needs_review"][0]["screening_risks"]
+    assert gated["rejected"] == []
+
+
+def test_title_intent_exact_match_overrides_llm_relevance_rejection(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "llm")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    llm = StaticRelevanceLLM(
+        json.dumps(
+            {
+                "decisions": [
+                    {
+                        "candidate_index": 0,
+                        "topic_status": "off_topic",
+                        "confidence": 0.99,
+                        "matched_concepts": [],
+                        "missing_concepts": ["self-attention", "multi-head attention"],
+                        "reason": "Missing detailed topic concepts.",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr("src.research_agent.reference_relevance.LLMClient", lambda: llm)
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Attention Is All You Need",
+                    "arxiv_id": "1706.03762",
+                    "source": "https://arxiv.org/abs/1706.03762",
+                    "authors": "Ashish Vaswani",
+                    "year": "2017",
+                    "abstract": "We propose the Transformer.",
+                    "retrieval_channel": "exact_title",
+                }
+            )
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+    query_plan = {
+        "search_mode": "computer",
+        "query_intent": "title",
+        "intent": {"top_intent": "title", "template": "title", "scores": {"title": 0.94}},
+        "extracted": {"title": "Attention Is All You Need"},
+        "backend_query": "attention is all you need",
+    }
+
+    gated = apply_relevance_gate("attention is all you need", screened, query_plan=query_plan)
+
+    assert [item["title"] for item in gated["qualified"]] == ["Attention Is All You Need"]
+    assert gated["qualified"][0]["topic_relevance_status"] == "relevant"
+    assert gated["rejected"] == []
 
 
 def test_topic_relevance_gate_uses_search_plan_for_translated_topics() -> None:
@@ -734,6 +3226,283 @@ def test_society_rules_relevance_gate_filters_off_topic(monkeypatch) -> None:
     assert gated["rejected"][0]["topic_relevance_status"] == "off_topic"
 
 
+def test_biomedical_rules_relevance_gate_sends_task_gap_to_review(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Ecological Approaches to Dental Caries",
+                    "doi": "10.1000/dental-caries-ecology",
+                    "source": "https://doi.org/10.1000/dental-caries-ecology",
+                    "abstract": "This review discusses the oral ecology and biofilm mechanisms of dental caries.",
+                }
+            ),
+            screen_reference(
+                {
+                    "title": "Radiation Detector Field Mapping",
+                    "doi": "10.1000/radiation-detector",
+                    "source": "https://doi.org/10.1000/radiation-detector",
+                    "abstract": "We probe electric fields in CdTe radiation detectors.",
+                }
+            ),
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+
+    gated = apply_relevance_gate(
+        "蛀牙预防",
+        screened,
+        query_plan={"backend_query": "dental caries prevention", "core_concepts": ["dental caries", "prevention"]},
+    )
+
+    assert [item["title"] for item in gated["needs_review"]] == [
+        "Ecological Approaches to Dental Caries"
+    ]
+    assert gated["needs_review"][0]["topic_relevance_status"] == "borderline"
+    assert "missing_required_topic_concepts:plan_biomedical_1" in gated["needs_review"][0]["screening_risks"]
+    assert gated["rejected"][0]["title"] == "Radiation Detector Field Mapping"
+    assert gated["rejected"][0]["topic_relevance_status"] == "off_topic"
+
+
+def test_computer_rules_relevance_gate_filters_off_topic(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Retrieval Augmented Generation for Legal Question Answering",
+                    "doi": "10.1000/rag-legal-qa",
+                    "source": "https://doi.org/10.1000/rag-legal-qa",
+                    "abstract": "We evaluate RAG methods for legal QA benchmarks.",
+                }
+            ),
+            screen_reference(
+                {
+                    "title": "Lithium-Ion Battery Thermal Runaway Prediction",
+                    "doi": "10.1000/battery-runaway",
+                    "source": "https://doi.org/10.1000/battery-runaway",
+                    "abstract": "A thermal model predicts battery safety events.",
+                }
+            ),
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+
+    gated = apply_relevance_gate(
+        "法律问答中的检索增强生成",
+        screened,
+        query_plan={
+            "search_mode": "computer",
+            "backend_query": "retrieval augmented generation legal question answering",
+            "core_concepts": ["retrieval augmented generation", "legal question answering"],
+            "synonyms": ["RAG", "legal QA"],
+        },
+    )
+
+    assert [item["title"] for item in gated["qualified"]] == [
+        "Retrieval Augmented Generation for Legal Question Answering"
+    ]
+    assert gated["rejected"][0]["title"] == "Lithium-Ion Battery Thermal Runaway Prediction"
+    assert gated["rejected"][0]["topic_relevance_status"] == "off_topic"
+
+
+def test_computer_rules_relevance_gate_sends_benchmark_gap_to_review(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Retrieval Augmented Generation for Legal Question Answering",
+                    "doi": "10.1000/rag-legal-qa-methods",
+                    "source": "https://doi.org/10.1000/rag-legal-qa-methods",
+                    "abstract": "We study RAG methods for legal QA systems in practice.",
+                }
+            ),
+            screen_reference(
+                {
+                    "title": "Retrieval Augmented Generation for Medical Question Answering",
+                    "doi": "10.1000/rag-medical-qa",
+                    "source": "https://doi.org/10.1000/rag-medical-qa",
+                    "abstract": "This paper evaluates RAG systems for clinical and biomedical question answering.",
+                }
+            ),
+            screen_reference(
+                {
+                    "title": "Autonomous Vehicle Path Planning",
+                    "doi": "10.1000/vehicle-path-planning",
+                    "source": "https://doi.org/10.1000/vehicle-path-planning",
+                    "abstract": "A motion planning algorithm is proposed for autonomous driving.",
+                }
+            ),
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+
+    gated = apply_relevance_gate(
+        "法律问答中的检索增强生成基准",
+        screened,
+        query_plan={
+            "search_mode": "computer",
+            "backend_query": "retrieval augmented generation legal question answering benchmark",
+            "core_concepts": ["retrieval augmented generation", "legal question answering", "benchmark"],
+            "synonyms": ["RAG", "legal QA"],
+        },
+    )
+
+    assert [item["title"] for item in gated["needs_review"]] == [
+        "Retrieval Augmented Generation for Legal Question Answering"
+    ]
+    assert gated["needs_review"][0]["topic_relevance_status"] == "borderline"
+    assert "missing_required_computer_concepts:benchmark" in gated["needs_review"][0]["screening_risks"]
+    assert [item["title"] for item in gated["rejected"]] == [
+        "Retrieval Augmented Generation for Medical Question Answering",
+        "Autonomous Vehicle Path Planning",
+    ]
+    assert all(item["topic_relevance_status"] == "off_topic" for item in gated["rejected"])
+
+
+def test_engineering_rules_relevance_gate_sends_method_gap_to_review(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Countermeasures for lithium-ion battery thermal runaway",
+                    "doi": "10.1000/battery-countermeasures",
+                    "source": "https://doi.org/10.1000/battery-countermeasures",
+                    "abstract": "This article discusses lithium-ion battery thermal runaway hazards and safety countermeasures.",
+                }
+            ),
+            screen_reference(
+                {
+                    "title": "Quantum Batteries as Work Sources for Parametric Amplification",
+                    "arxiv_id": "2601.00001",
+                    "source": "https://arxiv.org/abs/2601.00001",
+                    "abstract": "This work studies quantum batteries for phase-locked amplification.",
+                }
+            ),
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+
+    gated = apply_relevance_gate(
+        "锂离子电池热失控预测模型",
+        screened,
+        query_plan={
+            "search_mode": "engineering",
+            "backend_query": "lithium-ion battery thermal runaway prediction model",
+            "core_concepts": ["lithium-ion battery", "thermal runaway", "prediction model"],
+            "synonyms": ["Li-ion battery", "thermal runaway prediction", "battery thermal runaway model"],
+        },
+    )
+
+    assert [item["title"] for item in gated["needs_review"]] == [
+        "Countermeasures for lithium-ion battery thermal runaway"
+    ]
+    assert gated["needs_review"][0]["topic_relevance_status"] == "borderline"
+    assert "missing_required_engineering_concepts:prediction model" in gated["needs_review"][0]["screening_risks"]
+    assert gated["rejected"][0]["title"] == "Quantum Batteries as Work Sources for Parametric Amplification"
+
+
+def test_society_rules_relevance_gate_sends_governance_gap_to_review(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "rules")
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Platform Labor in China",
+                    "doi": "10.1000/platform-labor-china",
+                    "source": "https://doi.org/10.1000/platform-labor-china",
+                    "abstract": "This article studies digital platform labor and worker experiences in China.",
+                }
+            ),
+            screen_reference(
+                {
+                    "title": "Algorithmic Scheduling for Autonomous Vehicle Routing",
+                    "doi": "10.1000/vehicle-routing",
+                    "source": "https://doi.org/10.1000/vehicle-routing",
+                    "abstract": "We optimize scheduling and route planning for autonomous vehicles.",
+                }
+            ),
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+
+    gated = apply_relevance_gate(
+        "中国平台劳动算法管理",
+        screened,
+        query_plan={
+            "search_mode": "society",
+            "backend_query": "platform labor algorithmic management China",
+            "core_concepts": ["platform labor", "algorithmic management", "China"],
+        },
+    )
+
+    assert [item["title"] for item in gated["needs_review"]] == [
+        "Platform Labor in China"
+    ]
+    assert gated["needs_review"][0]["topic_relevance_status"] == "borderline"
+    assert "missing_required_social_concepts:algorithmic management" in gated["needs_review"][0]["screening_risks"]
+    assert gated["rejected"][0]["title"] == "Algorithmic Scheduling for Autonomous Vehicle Routing"
+    assert gated["rejected"][0]["topic_relevance_status"] == "off_topic"
+
+
+def test_engineering_llm_relevance_gate_uses_engineering_prompt(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_RELEVANCE_GATE", "hybrid")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    llm = StaticRelevanceLLM(
+        json.dumps(
+            {
+                "decisions": [
+                    {
+                        "candidate_index": 0,
+                        "topic_status": "relevant",
+                        "confidence": 0.91,
+                        "matched_concepts": ["lithium-ion battery", "thermal runaway prediction"],
+                        "missing_concepts": [],
+                        "reason": "The candidate studies lithium-ion battery thermal runaway prediction.",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr("src.research_agent.reference_relevance.LLMClient", lambda: llm)
+    screened = {
+        "qualified": [
+            screen_reference(
+                {
+                    "title": "Lithium-Ion Battery Thermal Runaway Prediction",
+                    "doi": "10.1000/battery-runaway",
+                    "source": "https://doi.org/10.1000/battery-runaway",
+                    "abstract": "This study predicts thermal runaway in lithium-ion batteries.",
+                }
+            )
+        ],
+        "needs_review": [],
+        "rejected": [],
+    }
+
+    gated = apply_relevance_gate(
+        "锂电池热失控预测",
+        screened,
+        query_plan={
+            "search_mode": "engineering",
+            "backend_query": "lithium-ion battery thermal runaway prediction",
+            "core_concepts": ["lithium-ion battery", "thermal runaway prediction"],
+        },
+    )
+
+    assert "engineering literature relevance reviewer" in llm.calls[0]["system_prompt"]
+    assert gated["qualified"][0]["llm_relevance_status"] == "relevant"
+
+
 def test_llm_relevance_gate_sends_low_confidence_to_review(monkeypatch) -> None:
     monkeypatch.setenv("PAPER_RELEVANCE_GATE", "hybrid")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -809,12 +3578,44 @@ def test_reference_verification_marks_crossref_verified(monkeypatch) -> None:
             "abstract": "Verified abstract.",
         },
     )
+    monkeypatch.setattr("src.research_agent.reference_verification.doi_resolution_status", lambda doi: "resolved")
 
     verified = verify_reference({"title": "A DOI paper", "doi": "10.1000/example"})
 
     assert verified["verification_status"] == "verified"
     assert "Crossref" in verified["verification_sources"]
     assert verified["provenance"]["evidence_level"] == "metadata+abstract"
+
+
+def test_reference_verification_demotes_unresolvable_doi(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.research_agent.reference_verification.fetch_crossref_metadata",
+        lambda doi: {
+            "doi": doi,
+            "title": "A DOI paper",
+            "source": f"https://doi.org/{doi}",
+            "authors": "Ada Lovelace",
+            "year": "2024",
+            "abstract": "Verified abstract.",
+        },
+    )
+    monkeypatch.setattr("src.research_agent.reference_verification.doi_resolution_status", lambda doi: "failed")
+
+    verified = verify_reference({"title": "A DOI paper", "doi": "10.1000/missing"})
+
+    assert verified["verification_status"] == "needs_review"
+    assert "doi_resolution_failed" in verified["verification_risks"]
+
+
+def test_unverified_search_candidate_moves_to_needs_review() -> None:
+    qualified, needs_review = ResearchWebHandler._split_verified_search_candidates(
+        [{"title": "Unverified DOI paper", "verification_status": "unverified", "screening_risks": []}],
+        [],
+    )
+
+    assert qualified == []
+    assert needs_review[0]["screening_status"] == "needs_review"
+    assert "verification_lookup_failed" in needs_review[0]["screening_risks"]
 
 
 def test_search_candidates_do_not_start_analysis_job(monkeypatch) -> None:
@@ -959,6 +3760,91 @@ def test_literature_search_job_endpoint_returns_job() -> None:
     assert sent["payload"]["stage"] == "Searching literature..."
 
 
+def test_novelty_job_verifies_candidates_and_preserves_status(monkeypatch, tmp_path) -> None:
+    handler = object.__new__(ResearchWebHandler)
+    handler.server = type("FakeServer", (), {"server_port": 8126})()
+    monkeypatch.setattr(web_app, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(web_app, "HISTORY_PATH", tmp_path / "history_records.json")
+    monkeypatch.setattr(
+        web_app,
+        "build_novelty_plan",
+        lambda innovation_text, search_mode: {
+            "clean_innovation_text": innovation_text,
+            "domain": search_mode,
+            "claims": [{"claim_id": "C1", "claim": "claim"}],
+            "queries": [],
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "run_novelty_search_plan",
+        lambda *args, **kwargs: {
+            "status": "done",
+            "plan": args[0],
+            "candidates": [
+                {
+                    "title": "Verified stroke segmentation work",
+                    "abstract": "ischemic stroke segmentation lightweight encoder",
+                    "doi": "10.1000/verified",
+                    "candidate_status": "strong_candidate",
+                    "screening_status": "qualified",
+                    "matched_claim_ids": ["C1"],
+                },
+                {
+                    "title": "Unverified stroke segmentation work",
+                    "abstract": "ischemic stroke segmentation",
+                    "candidate_status": "weak_candidate",
+                    "screening_status": "qualified",
+                    "matched_claim_ids": ["C1"],
+                },
+            ],
+            "source_noise": [],
+            "diagnostics": {"warnings": []},
+            "source_results": {"semantic": 2},
+            "errors": {},
+            "raw_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "verify_references",
+        lambda references: [
+            {**reference, "verification_status": "verified" if index == 0 else "unverified"}
+            for index, reference in enumerate(references)
+        ],
+    )
+    monkeypatch.setattr("src.research_agent.novelty_check.NoveltyCheckWorkflow._can_use_llm", lambda self: False)
+    web_app.JOBS.clear()
+    history_id = ResearchWebHandler._create_history_entry(
+        kind="novelty_check",
+        source="novelty",
+        title="claim",
+        status="queued",
+        request={"innovation_text": "claim"},
+    )
+
+    handler._run_novelty_check_job(
+        "novelty-job-verify",
+        history_id,
+        {
+            "innovation_text": "claim",
+            "search_mode": "computer",
+            "sources": "semantic",
+            "year": "",
+            "max_results_per_source": 2,
+            "timeout_seconds": 1,
+            "include_filtered_references": False,
+            "max_assessment_references": 10,
+        },
+    )
+
+    job = web_app.JOBS["novelty-job-verify"]
+    assert job["status"] == "done"
+    statuses = {item["verification_status"] for item in job["comparisons"]}
+    assert {"verified", "unverified"} <= statuses
+    assert any(item["verification_status"] == "verified" for item in job["closest_prior_work"])
+
+
 def test_history_entries_persist_to_local_json(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(web_app, "HISTORY_PATH", tmp_path / "history_records.json")
     history_id = ResearchWebHandler._create_history_entry(
@@ -977,6 +3863,32 @@ def test_history_entries_persist_to_local_json(monkeypatch, tmp_path) -> None:
     assert entries[0]["id"] == history_id
     assert entry["title"] == "stroke segmentation"
     assert entry["counts"]["qualified"] == 1
+
+
+def test_history_entries_summary_omits_large_payloads(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(web_app, "HISTORY_PATH", tmp_path / "history_records.json")
+    ResearchWebHandler._create_history_entry(
+        kind="search_flow",
+        source="search",
+        title="stroke segmentation",
+        status="done",
+        request={
+            "query": "stroke segmentation",
+            "sources": "arxiv,pubmed",
+            "references": [{"title": "large request reference", "abstract": "x" * 1000}],
+        },
+        result={"qualified_references": [{"title": "Paper A", "abstract": "y" * 1000}]},
+        counts={"qualified": 1},
+    )
+
+    entries = ResearchWebHandler._history_entries(summary=True)
+
+    assert entries[0]["title"] == "stroke segmentation"
+    assert entries[0]["is_summary"] is True
+    assert entries[0]["request"] == {"query": "stroke segmentation", "sources": "arxiv,pubmed"}
+    assert entries[0]["counts"] == {"qualified": 1}
+    assert "result" not in entries[0]
+    assert "references" not in entries[0]["request"]
 
 
 def test_delete_history_entry_removes_local_record(monkeypatch, tmp_path) -> None:
@@ -1265,6 +4177,81 @@ def test_pdf_extract_page_limit_is_runtime_configurable(monkeypatch) -> None:
 
     monkeypatch.setenv("PDF_EXTRACT_PAGE_LIMIT", "all")
     assert ResearchWebHandler._pdf_extract_page_limit() is None
+
+
+def test_pdf_parser_mode_is_runtime_configurable(monkeypatch) -> None:
+    monkeypatch.delenv("PDF_PARSER", raising=False)
+    assert ResearchWebHandler._pdf_parser_mode() == "auto"
+
+    monkeypatch.setenv("PDF_PARSER", "basic")
+    assert ResearchWebHandler._pdf_parser_mode() == "basic"
+
+    monkeypatch.setenv("PDF_PARSER", "opendataloader")
+    assert ResearchWebHandler._pdf_parser_mode() == "opendataloader"
+
+
+def test_pdf_auto_parser_uses_opendataloader_when_basic_extraction_is_sparse(monkeypatch) -> None:
+    monkeypatch.setenv("PDF_PARSER", "auto")
+    monkeypatch.setenv("PDF_OPENDATALOADER_MIN_CHARS", "20")
+
+    def fake_basic(content: bytes) -> dict:
+        assert content == b"%PDF"
+        return {
+            "text": "short",
+            "page_count": 4,
+            "extracted_pages": 1,
+            "metadata": {"title": "Basic"},
+            "note": "Extracted text from 1/4 pages.",
+        }
+
+    def fake_opendataloader(content: bytes) -> dict:
+        assert content == b"%PDF"
+        return {
+            "text": "Recovered structured markdown text from OpenDataLoader.",
+            "page_count": 4,
+            "extracted_pages": 4,
+            "metadata": {},
+            "note": "Extracted with OpenDataLoader PDF.",
+        }
+
+    monkeypatch.setattr(ResearchWebHandler, "_extract_pdf_content_basic", staticmethod(fake_basic))
+    monkeypatch.setattr(
+        ResearchWebHandler,
+        "_extract_pdf_content_with_opendataloader",
+        staticmethod(fake_opendataloader),
+    )
+
+    extracted = ResearchWebHandler._extract_pdf_content(b"%PDF")
+
+    assert extracted["text"].startswith("Recovered structured markdown")
+    assert extracted["metadata"] == {"title": "Basic"}
+    assert "Used because basic PDF extraction looked incomplete" in extracted["note"]
+
+
+def test_pdf_basic_parser_skips_opendataloader(monkeypatch) -> None:
+    monkeypatch.setenv("PDF_PARSER", "basic")
+
+    def fake_basic(content: bytes) -> dict:
+        assert content == b"%PDF"
+        return {
+            "text": "short",
+            "page_count": 4,
+            "extracted_pages": 1,
+            "metadata": {},
+            "note": "basic",
+        }
+
+    def fail_opendataloader(content: bytes) -> dict:
+        raise AssertionError("OpenDataLoader should not run in basic mode")
+
+    monkeypatch.setattr(ResearchWebHandler, "_extract_pdf_content_basic", staticmethod(fake_basic))
+    monkeypatch.setattr(
+        ResearchWebHandler,
+        "_extract_pdf_content_with_opendataloader",
+        staticmethod(fail_opendataloader),
+    )
+
+    assert ResearchWebHandler._extract_pdf_content(b"%PDF")["note"] == "basic"
 
 
 def test_pdf_export_detects_wide_tables_and_normalizes_symbols() -> None:
@@ -2265,6 +5252,20 @@ def test_frontend_analysis_export_includes_summary_fact_risks_but_not_row_debug_
     assert "debugFactSlotColumns" in app_js
 
 
+def test_frontend_novelty_diagnostics_displays_llm_warnings() -> None:
+    view = Path("src/views/NoveltyCheckView.jsx").read_text(encoding="utf-8")
+
+    assert "llmAssessment?.warnings" in view
+    assert "...llmWarnings" in view
+    assert "NoveltyDimensionSummary" in view
+    assert "ClosestPriorWork" in view
+    assert 't("search.limit")' not in view
+    assert "novelty-source-chip" not in view
+    assert 'setSettingsBranch("source")' in view
+    assert "max_results_per_source: Number(noveltyForm.limit" not in Path("src/App.jsx").read_text(encoding="utf-8")
+    assert "novelty.sourceReturned" in view
+
+
 def test_literature_integration_retries_summary_only_before_fallback() -> None:
     llm = FailingIntegratorThenSummaryLLM()
     workflow = LiteratureAnalysisWorkflow(llm=llm)
@@ -2638,6 +5639,20 @@ def test_markdown_table_split_handles_escaped_pipe() -> None:
     row = ResearchWebHandler._split_markdown_table_row("| title | a\\|b |")
 
     assert row == ["title", "a|b"]
+
+
+def test_static_file_range_parser_supports_video_requests() -> None:
+    assert ResearchWebHandler._parse_byte_range("bytes=0-1023", 10_000) == (0, 1023)
+    assert ResearchWebHandler._parse_byte_range("bytes=500-", 10_000) == (500, 9_999)
+    assert ResearchWebHandler._parse_byte_range("bytes=-2048", 10_000) == (7_952, 9_999)
+    assert ResearchWebHandler._parse_byte_range("bytes=9999-20000", 10_000) == (9_999, 9_999)
+
+
+def test_static_file_range_parser_rejects_invalid_ranges() -> None:
+    assert ResearchWebHandler._parse_byte_range("", 10_000) is None
+    assert ResearchWebHandler._parse_byte_range("items=0-10", 10_000) is None
+    assert ResearchWebHandler._parse_byte_range("bytes=100-10", 10_000) is None
+    assert ResearchWebHandler._parse_byte_range("bytes=10000-", 10_000) is None
 
 
 

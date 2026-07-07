@@ -38,21 +38,28 @@ export default function DirectAnalysisView({
 
   return (
     <section id="directView" className="app-view direct-view is-active">
-      <div className="direct-hero">
-        <div className="direct-hero-copy">
+      <div className="direct-hero split-entry-hero split-entry-hero--direct">
+        <div className="direct-hero-copy split-entry-hero__copy">
           <p className="eyebrow direct-eyebrow">Direct Analysis</p>
           <h1>{t("direct.title")}</h1>
           <p className="view-lead">{t("direct.lead")}</p>
         </div>
-        <div className="direct-header-actions">
-          <span className={`analysis-status direct-status-pill direct-status-pill--${statusTone}`} role="status" aria-live="polite">
-            {currentStatus}
-          </span>
-          {showStartNewTask ? (
-            <button className="primary-button direct-new-task-button" type="button" onClick={onStartNewTask}>
-              {t("direct.startNewTask")}
-            </button>
-          ) : null}
+        <div className="split-entry-hero__stage">
+          <div className="direct-header-actions">
+            <span className={`analysis-status direct-status-pill direct-status-pill--${statusTone}`} role="status" aria-live="polite">
+              {currentStatus}
+            </span>
+            {showStartNewTask ? (
+              <button className="primary-button direct-new-task-button" type="button" onClick={onStartNewTask}>
+                {t("direct.startNewTask")}
+              </button>
+            ) : null}
+          </div>
+          <div className="split-entry-hero__dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
         </div>
       </div>
 

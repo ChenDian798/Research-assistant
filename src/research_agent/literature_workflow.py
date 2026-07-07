@@ -192,6 +192,7 @@ class LiteratureAnalysisWorkflow:
         final_report: str = "",
         citation_format: str = "APA",
         formatted_references: list[str] | None = None,
+        output_language: str | None = None,
     ) -> dict:
         normalized_references = self._normalize_references(references)
         clean_references = [
@@ -199,7 +200,7 @@ class LiteratureAnalysisWorkflow:
             for reference in normalized_references
             if self._is_literature_reference(reference)
         ]
-        output_language = self._detect_output_language(topic, final_report, normalized_references)
+        output_language = self._normalize_output_language(output_language) or self._detect_output_language(topic, final_report, normalized_references)
         if not clean_references:
             summary = self._context_only_summary(final_report, output_language)
             summary["references"] = formatted_references or []
@@ -746,9 +747,7 @@ Requirements:
             if normalized:
                 normalized = self._merge_integrated_rows(normalized, normalized_fallback)
                 summary = self._normalize_summary(data.get("summary"), normalized, references, output_language)
-                summary = self._ensure_summary_coverage(summary, normalized, output_language)
-                summary = self._annotate_report_quality(summary, normalized, output_language, integrated=True)
-                return await self._finalize_analysis_result(
+                return await self._finalize_synthesized_analysis(
                     normalized,
                     summary,
                     output_language,
@@ -766,14 +765,7 @@ Requirements:
                 output_language,
             )
             if retry_summary:
-                retry_summary = self._ensure_summary_coverage(retry_summary, normalized_fallback, output_language)
-                retry_summary = self._annotate_report_quality(
-                    retry_summary,
-                    normalized_fallback,
-                    output_language,
-                    integrated=True,
-                )
-                return await self._finalize_analysis_result(
+                return await self._finalize_synthesized_analysis(
                     normalized_fallback,
                     retry_summary,
                     output_language,
@@ -781,12 +773,12 @@ Requirements:
                 )
 
             summary = self._integration_unavailable_summary(normalized_fallback, output_language)
-            summary = self._annotate_report_quality(summary, normalized_fallback, output_language, integrated=False)
-            return await self._finalize_analysis_result(
+            return await self._finalize_annotated_analysis(
                 normalized_fallback,
                 summary,
                 output_language,
                 references,
+                integrated=False,
             )
 
         fallback_rows = self._fallback_rows_from_references(
@@ -799,13 +791,41 @@ Requirements:
             output_language=output_language,
         )
         summary = self._integration_unavailable_summary(fallback_rows, output_language)
-        summary = self._annotate_report_quality(summary, fallback_rows, output_language, integrated=False)
-        return await self._finalize_analysis_result(
+        return await self._finalize_annotated_analysis(
             fallback_rows,
             summary,
             output_language,
             references,
+            integrated=False,
         )
+
+    async def _finalize_synthesized_analysis(
+        self,
+        rows: list[dict],
+        summary: dict,
+        output_language: str,
+        references: list[dict],
+    ) -> dict:
+        summary = self._ensure_summary_coverage(summary, rows, output_language)
+        return await self._finalize_annotated_analysis(
+            rows,
+            summary,
+            output_language,
+            references,
+            integrated=True,
+        )
+
+    async def _finalize_annotated_analysis(
+        self,
+        rows: list[dict],
+        summary: dict,
+        output_language: str,
+        references: list[dict],
+        *,
+        integrated: bool,
+    ) -> dict:
+        summary = self._annotate_report_quality(summary, rows, output_language, integrated=integrated)
+        return await self._finalize_analysis_result(rows, summary, output_language, references)
 
     async def _retry_summary_only(
         self,
@@ -1345,25 +1365,6 @@ Requirements:
         return LiteratureAnalysisWorkflow._dedupe_candidates(candidates, limit=limit)
 
     @staticmethod
-    def _extract_limitation_candidates(text: str) -> list[str]:
-        sections = LiteratureAnalysisWorkflow._section_slices(text)
-        sources = []
-        if sections.get("limitations"):
-            sources.append(sections["limitations"])
-        sources.extend(
-            LiteratureAnalysisWorkflow._candidate_snippet(text, match.start(), match.end(), window_chars=900)
-            for match in re.finditer(r"(?i)\b(?:limitations?|limited by|limitation of the study)\b|局限|限制|不足", text)
-        )
-        candidates: list[str] = []
-        for source in sources:
-            for sentence in LiteratureAnalysisWorkflow._split_candidate_sentences(source):
-                if re.fullmatch(r"(?i)\s*limitations?\.?\s*|局限性?", sentence.strip()):
-                    continue
-                if re.search(r"(?i)\b(?:limitations?|limited|cohort|trial|experts?|outcomes?|mimics?|hemorrhage|haemorrhage|generalizability|single[- ]center|single)\b|局限|限制|不足|队列|专家|结局|泛化", sentence):
-                    candidates.append(sentence)
-        return LiteratureAnalysisWorkflow._dedupe_candidates(candidates, limit=6)
-
-    @staticmethod
     def _extract_limitation_candidates(text: str) -> list[dict]:
         sections = LiteratureAnalysisWorkflow._section_slices(text)
         allowed_sources: list[tuple[str, str]] = []
@@ -1462,24 +1463,6 @@ Requirements:
             for part in re.split(r"(?<=[.!?。！？])\s+|[；;]\s*", str(text or ""))
             if len(part.strip()) >= 12
         ]
-
-    @staticmethod
-    def _dedupe_candidates(candidates: list[str], *, limit: int) -> list[str]:
-        deduped = []
-        seen = set()
-        for candidate in candidates:
-            candidate = re.sub(r"\.\s+(?=(?:no|only|single|not|limited|it\s+did|this\s+study)\b)", "; ", str(candidate or ""), flags=re.IGNORECASE)
-            cleaned = re.sub(r"\s+", " ", str(candidate or "")).strip(" ;,，。")
-            if not cleaned:
-                continue
-            key = cleaned.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(cleaned)
-            if len(deduped) >= limit:
-                break
-        return deduped
 
     @staticmethod
     def _dedupe_candidates(candidates: list, *, limit: int) -> list:
@@ -1987,6 +1970,13 @@ Rules:
         return "zh"
 
     @staticmethod
+    def _normalize_output_language(output_language: str | None) -> str:
+        value = str(output_language or "").strip().casefold()
+        if value in {"zh", "en"}:
+            return value
+        return ""
+
+    @staticmethod
     def _language_instruction(output_language: str) -> str:
         if output_language == "zh":
             return (
@@ -2102,12 +2092,54 @@ Rules:
 
     @staticmethod
     def _normalize_rows(rows: list, references: list[dict], output_language: str = "zh") -> list[dict]:
-        def source_key(value: str) -> str:
-            return str(value or "").strip().casefold().rstrip("/")
+        by_title, by_source, by_index = LiteratureAnalysisWorkflow._reference_lookup_maps(references)
+        normalized = []
+        seen = set()
+        for row_index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            title, source = LiteratureAnalysisWorkflow._row_title_and_source(row, by_source)
+            original = LiteratureAnalysisWorkflow._match_original_reference(
+                row,
+                row_index=row_index,
+                row_count=len(rows),
+                title=title,
+                source=source,
+                references=references,
+                by_title=by_title,
+                by_source=by_source,
+                by_index=by_index,
+            )
+            if references and not original:
+                continue
+            if original:
+                title = str(original.get("title", "") or title).strip()
+                source = str(original.get("source", "") or source).strip()
+            if not title:
+                continue
+            key = LiteratureAnalysisWorkflow._source_key(source) or title.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_row = LiteratureAnalysisWorkflow._build_normalized_row(
+                row,
+                original,
+                title=title,
+                source=source,
+            )
+            LiteratureAnalysisWorkflow._finalize_normalized_row(normalized_row, original, output_language)
+            normalized.append(normalized_row)
+        return normalized
 
+    @staticmethod
+    def _source_key(value: str) -> str:
+        return str(value or "").strip().casefold().rstrip("/")
+
+    @staticmethod
+    def _reference_lookup_maps(references: list[dict]) -> tuple[dict[str, dict], dict[str, dict], dict[int, dict]]:
         by_title = {item["title"].casefold(): item for item in references}
         by_source = {
-            source_key(item["source"]): item
+            LiteratureAnalysisWorkflow._source_key(item["source"]): item
             for item in references
             if item.get("source")
         }
@@ -2116,72 +2148,96 @@ Rules:
             for item in references
             if isinstance(item.get("index"), int)
         }
-        normalized = []
-        seen = set()
-        for row_index, row in enumerate(rows):
-            if not isinstance(row, dict):
-                continue
-            title = str(row.get("title", "")).strip()
-            source = str(row.get("source", "")).strip()
-            if not title and source:
-                original_by_source = by_source.get(source_key(source), {})
-                title = str(original_by_source.get("title", "")).strip()
-            reference_index = LiteratureAnalysisWorkflow._row_reference_index(row)
-            title_match = by_title.get(title.casefold(), {}) if title else {}
-            source_match = by_source.get(source_key(source), {}) if source else {}
-            index_match = by_index.get(reference_index) if reference_index is not None else None
-            if index_match and LiteratureAnalysisWorkflow._row_identity_conflicts_reference(
-                row,
-                index_match,
-                title_match=title_match,
-                source_match=source_match,
-            ):
-                original = title_match or source_match or {}
-            else:
-                original = index_match or title_match or source_match or {}
-            if not original and len(rows) == len(references) and row_index < len(references):
-                original = references[row_index]
-            if references and not original:
-                continue
-            if original:
-                title = str(original.get("title", "") or title).strip()
-                source = str(original.get("source", "") or source).strip()
-            if not title:
-                continue
-            key = source_key(source) or title.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized_row = {
-                column: str(row.get(column) or original.get(column) or "").strip()
-                for column in ANALYSIS_COLUMNS
-            }
-            if original:
-                normalized_row["title"] = str(original.get("title") or title).strip()
-                normalized_row["source"] = str(original.get("source") or source).strip()
-                normalized_row["uploaded_filename"] = str(original.get("uploaded_filename") or "").strip()
-                normalized_row["source_origin"] = str(original.get("source_origin") or "").strip()
-                normalized_row["source_label"] = str(original.get("source_label") or "").strip()
-                normalized_row["screening_status"] = str(original.get("screening_status") or "").strip()
-                normalized_row["screening_risks"] = original.get("screening_risks") if isinstance(original.get("screening_risks"), list) else []
-                normalized_row["topic_relevance_status"] = str(original.get("topic_relevance_status") or "").strip()
-                normalized_row["topic_relevance_score"] = str(original.get("topic_relevance_score") or "").strip()
-                normalized_row["topic_relevance_risks"] = original.get("topic_relevance_risks") if isinstance(original.get("topic_relevance_risks"), list) else []
-                normalized_row["verification_status"] = str(original.get("verification_status") or "").strip()
-                normalized_row["verification_risks"] = original.get("verification_risks") if isinstance(original.get("verification_risks"), list) else []
-                normalized_row["provenance"] = original.get("provenance") if isinstance(original.get("provenance"), dict) else {}
-            LiteratureAnalysisWorkflow._attach_and_backfill_evidence_candidates(normalized_row, original)
-            LiteratureAnalysisWorkflow._sync_generic_fact_aliases(normalized_row)
-            LiteratureAnalysisWorkflow._fill_fact_slot_defaults(normalized_row)
-            LiteratureAnalysisWorkflow._sanitize_row_metric_consistency(normalized_row, output_language)
-            LiteratureAnalysisWorkflow._sanitize_row_fact_slot_consistency(normalized_row, output_language)
-            LiteratureAnalysisWorkflow._separate_limitations_and_fact_risks(normalized_row, output_language)
-            LiteratureAnalysisWorkflow._fill_review_defaults(normalized_row, original, output_language)
-            if output_language == "zh":
-                LiteratureAnalysisWorkflow._localize_row_labels(normalized_row)
-            LiteratureAnalysisWorkflow._fill_legacy_aliases(normalized_row)
-            normalized.append(normalized_row)
-        return normalized
+        return by_title, by_source, by_index
+
+    @staticmethod
+    def _row_title_and_source(row: dict, by_source: dict[str, dict]) -> tuple[str, str]:
+        title = str(row.get("title", "")).strip()
+        source = str(row.get("source", "")).strip()
+        if not title and source:
+            original_by_source = by_source.get(LiteratureAnalysisWorkflow._source_key(source), {})
+            title = str(original_by_source.get("title", "")).strip()
+        return title, source
+
+    @staticmethod
+    def _match_original_reference(
+        row: dict,
+        *,
+        row_index: int,
+        row_count: int,
+        title: str,
+        source: str,
+        references: list[dict],
+        by_title: dict[str, dict],
+        by_source: dict[str, dict],
+        by_index: dict[int, dict],
+    ) -> dict:
+        reference_index = LiteratureAnalysisWorkflow._row_reference_index(row)
+        title_match = by_title.get(title.casefold(), {}) if title else {}
+        source_match = by_source.get(LiteratureAnalysisWorkflow._source_key(source), {}) if source else {}
+        index_match = by_index.get(reference_index) if reference_index is not None else None
+        if index_match and LiteratureAnalysisWorkflow._row_identity_conflicts_reference(
+            row,
+            index_match,
+            title_match=title_match,
+            source_match=source_match,
+        ):
+            original = title_match or source_match or {}
+        else:
+            original = index_match or title_match or source_match or {}
+        if not original and row_count == len(references) and row_index < len(references):
+            original = references[row_index]
+        return original
+
+    @staticmethod
+    def _build_normalized_row(row: dict, original: dict, *, title: str, source: str) -> dict:
+        normalized_row = {
+            column: str(row.get(column) or original.get(column) or "").strip()
+            for column in ANALYSIS_COLUMNS
+        }
+        if original:
+            LiteratureAnalysisWorkflow._copy_reference_identity_fields(
+                normalized_row,
+                original,
+                title=title,
+                source=source,
+            )
+        return normalized_row
+
+    @staticmethod
+    def _copy_reference_identity_fields(
+        row: dict,
+        original: dict,
+        *,
+        title: str,
+        source: str,
+    ) -> None:
+        row["title"] = str(original.get("title") or title).strip()
+        row["source"] = str(original.get("source") or source).strip()
+        row["uploaded_filename"] = str(original.get("uploaded_filename") or "").strip()
+        row["source_origin"] = str(original.get("source_origin") or "").strip()
+        row["source_label"] = str(original.get("source_label") or "").strip()
+        row["screening_status"] = str(original.get("screening_status") or "").strip()
+        row["screening_risks"] = original.get("screening_risks") if isinstance(original.get("screening_risks"), list) else []
+        row["topic_relevance_status"] = str(original.get("topic_relevance_status") or "").strip()
+        row["topic_relevance_score"] = str(original.get("topic_relevance_score") or "").strip()
+        row["topic_relevance_risks"] = original.get("topic_relevance_risks") if isinstance(original.get("topic_relevance_risks"), list) else []
+        row["verification_status"] = str(original.get("verification_status") or "").strip()
+        row["verification_risks"] = original.get("verification_risks") if isinstance(original.get("verification_risks"), list) else []
+        row["provenance"] = original.get("provenance") if isinstance(original.get("provenance"), dict) else {}
+
+    @staticmethod
+    def _finalize_normalized_row(row: dict, original: dict, output_language: str) -> None:
+        LiteratureAnalysisWorkflow._attach_and_backfill_evidence_candidates(row, original)
+        LiteratureAnalysisWorkflow._sync_generic_fact_aliases(row)
+        LiteratureAnalysisWorkflow._fill_fact_slot_defaults(row)
+        LiteratureAnalysisWorkflow._sanitize_row_metric_consistency(row, output_language)
+        LiteratureAnalysisWorkflow._sanitize_row_fact_slot_consistency(row, output_language)
+        LiteratureAnalysisWorkflow._separate_limitations_and_fact_risks(row, output_language)
+        LiteratureAnalysisWorkflow._fill_review_defaults(row, original, output_language)
+        if output_language == "zh":
+            LiteratureAnalysisWorkflow._localize_row_labels(row)
+        LiteratureAnalysisWorkflow._fill_legacy_aliases(row)
 
     @staticmethod
     def _row_reference_index(row: dict) -> int | None:
@@ -3172,23 +3228,6 @@ Rules:
         if not text:
             return False
         lower = text.casefold()
-        if lower in {"unclear", "unknown", "not reported", "n/a", "na", "none", "未明确", "未知", "不清楚"}:
-            return False
-        unclear_patterns = [
-            r"^未(明确)?(报告|说明|提供|列出|提及|公开)",
-            r"^未在.*(明确)?(报告|说明|提供|列出|提及)",
-            r"^没有(明确)?(报告|说明|提供|列出|提及)",
-            r"^no\s+(clear|explicit)?\s*(report|statement|information)",
-            r"^not\s+(clearly|explicitly)?\s*(reported|stated|provided|available)",
-        ]
-        return not any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in unclear_patterns)
-
-    @staticmethod
-    def _has_clear_fact(value) -> bool:
-        text = str(value or "").strip()
-        if not text:
-            return False
-        lower = text.casefold()
         explicit_unclear = {
             "unclear",
             "unknown",
@@ -3446,25 +3485,6 @@ Rules:
                 normalized["confidence"] = "Medium; includes extracted PDF text but may not cover full papers." if has_pdf_text else "Low; based on metadata, abstracts, links, or report context."
         return normalized
 
-        if not normalized["overall_assessment"]:
-            normalized["overall_assessment"] = (
-                f"已整合 {len(rows)} 篇/项文献；具体结论需结合全文和证据质量继续核验。"
-            )
-        if not normalized["recommended_reading_order"]:
-            normalized["recommended_reading_order"] = [
-                f"{row.get('title') or row.get('source')}：优先核验核心贡献与证据"
-                for row in rows[: min(5, len(rows))]
-                if row.get("title") or row.get("source")
-            ]
-        if not normalized["confidence"]:
-            has_pdf_text = any(reference.get("pdf_text_available") for reference in references)
-            normalized["confidence"] = (
-                "Medium; includes extracted PDF text but may not cover full papers."
-                if has_pdf_text
-                else "Low; based on metadata, abstracts, links, or report context."
-            )
-        return normalized
-
     @staticmethod
     def _fallback_summary(rows: list[dict], note: str, output_language: str = "zh") -> dict:
         used_analyst_outputs = "analyst outputs" in note or "分组分析" in note
@@ -3522,66 +3542,6 @@ Rules:
         summary["evidence_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "evidence_strength", limit=3)
         summary["research_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "limitations", limit=3)
         return summary
-        if output_language == "en":
-            summary = LiteratureAnalysisWorkflow._empty_summary()
-            summary["overall_assessment"] = f"Generated a structured review table for {len(rows)} literature item(s). {note}"
-            summary["common_strengths"] = LiteratureAnalysisWorkflow._collect_unique(rows, "strengths", limit=3)
-            summary["common_weaknesses"] = LiteratureAnalysisWorkflow._collect_unique(rows, "weaknesses", limit=3)
-            summary["methodological_patterns"] = LiteratureAnalysisWorkflow._collect_unique(rows, "methodology", limit=3)
-            summary["evidence_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "evidence_strength", limit=3)
-            summary["research_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "limitations", limit=3)
-            summary["recommended_reading_order"] = [
-                f"{row.get('title') or row.get('source')}: check the full-text evidence and methods first"
-                for row in rows[: min(5, len(rows))]
-                if row.get("title") or row.get("source")
-            ]
-            summary["next_actions"] = [
-                "Add full-text PDFs or reliable abstracts/metadata first.",
-                "Verify low-confidence items against methods, datasets, baselines, and statistical evidence.",
-                "Run a cross-literature comparison to separate consensus, disagreement, and research gaps.",
-            ]
-            summary["confidence"] = "Low; fallback summary generated without a successful integration pass."
-            return summary
-        summary = LiteratureAnalysisWorkflow._empty_summary()
-        summary["overall_assessment"] = f"已生成 {len(rows)} 篇/项文献的结构化评审表。{note}"
-        summary["common_strengths"] = LiteratureAnalysisWorkflow._collect_unique(rows, "strengths", limit=3)
-        summary["common_weaknesses"] = LiteratureAnalysisWorkflow._collect_unique(rows, "weaknesses", limit=3)
-        summary["methodological_patterns"] = LiteratureAnalysisWorkflow._collect_unique(rows, "methodology", limit=3)
-        summary["evidence_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "evidence_strength", limit=3)
-        summary["research_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "limitations", limit=3)
-        summary["recommended_reading_order"] = [
-            f"{row.get('title') or row.get('source')}：先核验全文证据和方法细节"
-            for row in rows[: min(5, len(rows))]
-            if row.get("title") or row.get("source")
-        ]
-        summary["next_actions"] = [
-            "优先补充全文 PDF 或可靠的摘要/元数据。",
-            "对低置信度条目核验实验设置、数据集、baseline 和统计显著性。",
-            "再做一次跨文献对比，区分共识、分歧和真正的研究空白。",
-        ]
-        summary["confidence"] = "较低；该总结是在集成步骤失败时自动生成的。"
-        return summary
-        summary = LiteratureAnalysisWorkflow._empty_summary()
-        summary["overall_assessment"] = (
-            f"已生成 {len(rows)} 篇/项文献的结构化评审表；{note}"
-        )
-        summary["common_strengths"] = LiteratureAnalysisWorkflow._collect_unique(rows, "strengths", limit=3)
-        summary["common_weaknesses"] = LiteratureAnalysisWorkflow._collect_unique(rows, "weaknesses", limit=3)
-        summary["methodological_patterns"] = LiteratureAnalysisWorkflow._collect_unique(rows, "methodology", limit=3)
-        summary["evidence_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "evidence_strength", limit=3)
-        summary["research_gaps"] = LiteratureAnalysisWorkflow._collect_unique(rows, "limitations", limit=3)
-        summary["recommended_reading_order"] = [
-            f"{row.get('title') or row.get('source')}：先核验全文证据和方法细节"
-            for row in rows[: min(5, len(rows))]
-            if row.get("title") or row.get("source")
-        ]
-        summary["next_actions"] = [
-            "优先补充全文 PDF 或可验证的摘要/元数据。",
-            "对低置信度条目核验实验设置、数据集、baseline 和统计显著性。",
-            "再做一次跨文献对比，区分共识、分歧和真正研究空白。",
-        ]
-        summary["confidence"] = "Low; fallback summary generated without a successful integration pass."
-        return summary
 
     @staticmethod
     def _empty_summary() -> dict:
@@ -3619,6 +3579,7 @@ Rules:
             ]
             summary["confidence"] = "High; no literature references were available after filtering auxiliary documents."
             return summary
+
         summary = LiteratureAnalysisWorkflow._empty_summary()
         has_context = bool(final_report.strip())
         summary["overall_assessment"] = (
@@ -3634,22 +3595,6 @@ Rules:
             "补充真正的论文来源后再生成逐篇分析。",
         ]
         summary["confidence"] = "较高；辅助文档过滤后没有可分析的文献条目。"
-        return summary
-        summary = LiteratureAnalysisWorkflow._empty_summary()
-        has_context = bool(final_report.strip())
-        summary["overall_assessment"] = (
-            "未发现可作为论文/文献条目分析的上传内容；上传材料更适合作为写作要求、评分标准、任务说明或其他辅助上下文。"
-            if has_context
-            else "未提供可分析的论文/文献条目。"
-        )
-        summary["research_gaps"] = [
-            "请补充 DOI、论文链接、PDF 全文，或明确哪些上传文件是需要分析的论文。"
-        ]
-        summary["next_actions"] = [
-            "将老师要求或评分标准保留为输出约束；不要把它们计入文献分析表。",
-            "补充真正的论文来源后再生成逐篇分析。"
-        ]
-        summary["confidence"] = "High; no literature references were available after filtering auxiliary documents."
         return summary
 
     @staticmethod
@@ -3781,21 +3726,6 @@ Rules:
 
         risks.extend(LiteratureAnalysisWorkflow._row_level_fact_risks(row, output_language))
         row["fact_risks"] = "; ".join(LiteratureAnalysisWorkflow._dedupe_fact_risks(risks))
-
-    @staticmethod
-    def _normalize_risk_list(value) -> list[str]:
-        if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item).strip() and str(item).strip().casefold() != "unclear"]
-        text = str(value or "").strip()
-        if not text or text.casefold() == "unclear":
-            return []
-        if text.startswith("[") and text.endswith("]"):
-            text = text.strip("[]")
-        return [
-            item.strip(" '\"\t\r\n")
-            for item in re.split(r";|；|\n", text)
-            if item.strip(" '\"\t\r\n") and item.strip(" '\"\t\r\n").casefold() != "unclear"
-        ]
 
     @staticmethod
     def _normalize_risk_list(value) -> list[str]:

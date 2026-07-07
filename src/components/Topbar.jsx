@@ -4,6 +4,8 @@ import { languageOptions } from "../lib/i18n.js";
 const navItems = [
   ["home", "nav.home"],
   ["direct", "nav.direct"],
+  ["standaloneSearch", "nav.standaloneSearch"],
+  ["novelty", "nav.novelty"],
   ["search", "nav.search"],
   ["history", "nav.history"],
 ];

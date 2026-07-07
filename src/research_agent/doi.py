@@ -21,6 +21,7 @@ ARXIV_PATTERN = re.compile(
 )
 PMID_PATTERN = re.compile(r"\b(?:PMID|PubMed\s+ID)\s*:?\s*(\d{6,9})\b", re.IGNORECASE)
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+_OPENALEX_DOI_CACHE: dict[str, dict] = {}
 
 
 def _user_agent() -> str:
@@ -38,28 +39,52 @@ def enrich_references_with_doi_metadata(references: list[dict]) -> list[dict]:
         if doi:
             metadata = fetch_crossref_metadata(doi)
             if metadata:
-                item.update(metadata)
+                item = merge_reference_metadata(item, metadata)
                 item["source"] = f"https://doi.org/{doi}"
                 item["relevance"] = metadata_relevance(metadata, item.get("relevance", ""))
+                mark_abstract_evidence(item)
         elif arxiv_id := extract_arxiv_id(item):
             metadata = fetch_arxiv_metadata(arxiv_id)
             if metadata:
-                item.update(metadata)
+                item = merge_reference_metadata(item, metadata)
                 item["source"] = f"https://arxiv.org/abs/{metadata['arxiv_id']}"
                 item["relevance"] = metadata_relevance(metadata, item.get("relevance", ""))
+                mark_abstract_evidence(item)
         elif pmid := extract_pmid(item):
             metadata = fetch_pubmed_metadata(pmid)
             if metadata:
-                item.update(metadata)
+                item = merge_reference_metadata(item, metadata)
                 item["source"] = f"https://pubmed.ncbi.nlm.nih.gov/{metadata['pmid']}/"
                 item["relevance"] = metadata_relevance(metadata, item.get("relevance", ""))
+                mark_abstract_evidence(item)
         elif url := extract_url(item):
             metadata = fetch_webpage_metadata(url)
             if metadata:
-                item.update(metadata)
+                item = merge_reference_metadata(item, metadata)
                 item["relevance"] = metadata_relevance(metadata, item.get("relevance", ""))
+                mark_abstract_evidence(item)
         enriched.append(item)
     return enriched
+
+
+def merge_reference_metadata(reference: dict, metadata: dict) -> dict:
+    item = dict(reference)
+    for key, value in metadata.items():
+        if key == "abstract" and not str(value or "").strip() and str(item.get("abstract") or "").strip():
+            continue
+        if str(value or "").strip() or key not in item:
+            item[key] = value
+    return item
+
+
+def mark_abstract_evidence(reference: dict) -> None:
+    if not str(reference.get("abstract") or "").strip():
+        return
+    provenance = dict(reference.get("provenance") or {})
+    current = str(provenance.get("evidence_level") or "").strip().lower()
+    if not current or current == "metadata":
+        provenance["evidence_level"] = "metadata+abstract"
+    reference["provenance"] = provenance
 
 
 def extract_doi(reference: dict) -> str:
@@ -167,16 +192,104 @@ def fetch_crossref_metadata(doi: str) -> dict:
     year = published_year(message)
     journal = first_text(message.get("container-title"))
     abstract = clean_abstract(str(message.get("abstract", "") or ""))
+    returned_doi = normalize_doi_text(str(message.get("DOI") or doi))
+    openalex_metadata = fetch_openalex_metadata_by_doi(returned_doi or doi) if not abstract else {}
+    if openalex_metadata.get("abstract"):
+        abstract = openalex_metadata["abstract"]
 
     return {
-        "doi": doi,
+        "doi": returned_doi or doi,
         "title": title,
-        "source": f"https://doi.org/{doi}",
+        "source": f"https://doi.org/{returned_doi or doi}",
         "authors": authors,
         "year": str(year) if year else "",
         "journal": journal,
         "abstract": abstract,
     }
+
+
+def fetch_openalex_metadata_by_doi(doi: str) -> dict:
+    normalized = normalize_doi_text(doi)
+    if not normalized:
+        return {}
+    cached = _OPENALEX_DOI_CACHE.get(normalized)
+    if cached is not None:
+        return dict(cached)
+
+    url = f"https://api.openalex.org/works/{quote(f'https://doi.org/{normalized}', safe=':/')}"
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": _user_agent(),
+        },
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            item = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+        _OPENALEX_DOI_CACHE[normalized] = {}
+        return {}
+    if not isinstance(item, dict):
+        _OPENALEX_DOI_CACHE[normalized] = {}
+        return {}
+
+    authorships = item.get("authorships", []) if isinstance(item.get("authorships"), list) else []
+    authors = [
+        ((authorship.get("author") or {}).get("display_name") or "")
+        for authorship in authorships[:6]
+        if isinstance(authorship, dict)
+    ]
+    if len(authorships) > 6:
+        authors.append("et al.")
+    primary_location = item.get("primary_location") if isinstance(item.get("primary_location"), dict) else {}
+    source = primary_location.get("source") if isinstance(primary_location.get("source"), dict) else {}
+    metadata = {
+        "doi": normalize_doi_text(str(item.get("doi") or normalized)),
+        "title": clean_abstract(str(item.get("display_name") or "")),
+        "source": str(item.get("doi") or f"https://doi.org/{normalized}"),
+        "authors": ", ".join(author for author in authors if author),
+        "year": str(item.get("publication_year") or ""),
+        "journal": clean_abstract(str(source.get("display_name") or "")),
+        "abstract": openalex_abstract(item.get("abstract_inverted_index")),
+    }
+    metadata = {key: value for key, value in metadata.items() if str(value or "").strip()}
+    _OPENALEX_DOI_CACHE[normalized] = dict(metadata)
+    return metadata
+
+
+def doi_resolution_status(doi: str) -> str:
+    normalized = normalize_doi_text(doi)
+    if not normalized:
+        return "failed"
+    request = Request(
+        f"https://doi.org/{normalized}",
+        headers={
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": _user_agent(),
+        },
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            if 200 <= status < 400:
+                return "resolved"
+            if 400 <= status < 500:
+                return "failed"
+            return "unknown"
+    except HTTPError as error:
+        if 400 <= int(error.code or 0) < 500:
+            return "failed"
+        return "unknown"
+    except (URLError, TimeoutError, OSError, IncompleteRead):
+        return "unknown"
+
+
+def normalize_doi_text(value: str) -> str:
+    doi = str(value or "").strip()
+    doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi, flags=re.IGNORECASE)
+    doi = re.sub(r"^doi:\s*", "", doi, flags=re.IGNORECASE)
+    return doi.strip().rstrip(".)]}")
 
 
 def fetch_arxiv_metadata(arxiv_id: str) -> dict:
@@ -371,6 +484,19 @@ def first_available(values: dict[str, list[str]], *keys: str) -> str:
 def first_year(value: str) -> str:
     match = re.search(r"\b(19|20)\d{2}\b", value or "")
     return match.group(0) if match else ""
+
+
+def openalex_abstract(index) -> str:
+    if not isinstance(index, dict):
+        return ""
+    words: list[tuple[int, str]] = []
+    for word, positions in index.items():
+        if not isinstance(positions, list):
+            continue
+        for position in positions:
+            if isinstance(position, int):
+                words.append((position, str(word)))
+    return clean_abstract(" ".join(word for _, word in sorted(words)))
 
 
 def metadata_relevance(metadata: dict, fallback: str) -> str:

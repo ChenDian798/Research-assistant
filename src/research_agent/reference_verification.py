@@ -4,6 +4,7 @@ from .doi import (
     extract_arxiv_id,
     extract_doi,
     extract_pmid,
+    doi_resolution_status,
     fetch_arxiv_metadata,
     fetch_crossref_metadata,
     fetch_pubmed_metadata,
@@ -24,9 +25,11 @@ def verify_reference(reference: dict) -> dict:
 
     metadata = {}
     verified_by = ""
+    doi_resolution = ""
     if doi:
         metadata = fetch_crossref_metadata(doi)
         verified_by = "Crossref"
+        doi_resolution = doi_resolution_status(doi)
     elif pmid:
         metadata = fetch_pubmed_metadata(pmid)
         verified_by = "PubMed"
@@ -37,6 +40,10 @@ def verify_reference(reference: dict) -> dict:
     if metadata:
         sources.append(verified_by)
         conflicts = metadata_conflicts(item, metadata)
+        if doi_resolution == "failed":
+            conflicts.append("doi_resolution_failed")
+        elif doi_resolution == "unknown":
+            risks.append("doi_resolution_unchecked")
         if conflicts:
             status = "needs_review"
             risks.extend(conflicts)

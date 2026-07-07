@@ -19,6 +19,8 @@ export default function ResultsView({
 }) {
   const hasText = Boolean(result.rows.length || result.summary);
   const hasRows = Boolean(result.rows.length);
+  const hasResultContent = Boolean(result.rows.length || result.summary || result.reviewNeededDocuments.length);
+  const tableMode = mode === "loading" && hasResultContent ? "done" : mode;
 
   return (
     <section id="resultsView" className="app-view is-active">
@@ -56,7 +58,7 @@ export default function ResultsView({
           rows={result.rows}
           displayReferences={result.displayReferences}
           reviewNeededDocuments={result.reviewNeededDocuments}
-          mode={mode}
+          mode={tableMode}
           errorMessage={errorMessage}
           t={t}
         />

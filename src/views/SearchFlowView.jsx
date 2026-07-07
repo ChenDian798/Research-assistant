@@ -16,6 +16,8 @@ const sourceOptions = [
 const searchModeOptions = [
   ["auto", "search.mode.auto"],
   ["biomedical", "search.mode.biomedical"],
+  ["computer", "search.mode.computer"],
+  ["engineering", "search.mode.engineering"],
   ["society", "search.mode.society"],
 ];
 
@@ -47,12 +49,10 @@ export default function SearchFlowView({
   t,
   language = "zh",
 }) {
-  const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
-  const [modeMenuOpen, setModeMenuOpen] = useState(false);
-  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
-  const sourceMenuRef = useRef(null);
-  const modeMenuRef = useRef(null);
-  const filterMenuRef = useRef(null);
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [settingsBranch, setSettingsBranch] = useState("");
+  const settingsMenuRef = useRef(null);
+  const queryTextareaRef = useRef(null);
   const isEnglish = language === "en";
   const sourceLabel = (label) => label.startsWith("search.") ? t(label) : label;
   const visibleSearchStatus = searchStatus || t("status.waitingSearch");
@@ -75,11 +75,13 @@ export default function SearchFlowView({
   const anyYearLabel = isEnglish ? "Any year" : "\u4efb\u610f\u5e74\u4efd";
   const perSourceLabel = isEnglish ? "each" : "\u6bcf\u6e90";
   const filterSummary = `${searchForm.year || anyYearLabel} / ${searchForm.limit || "-"} ${perSourceLabel}`;
+  const hasQueryInput = Boolean(searchForm.query.trim());
+  const submitButtonState = searchLoading ? "is-loading" : (hasQueryInput ? "is-ready" : "is-empty");
   const analysisActionLabel = analysisRunning
     ? t("search.viewAnalysisProgress")
     : (analysisQueued ? t("search.analysisSubmitted") : (hasAnalysisResult ? t("search.viewAnalysisResult") : t("search.nextAnalyze")));
   const handleStepChange = (step) => {
-    if (step === 4 && (analysisRunning || hasAnalysisResult)) {
+    if (step === 4 && hasAnalysisResult) {
       onViewResults();
       return;
     }
@@ -87,23 +89,31 @@ export default function SearchFlowView({
   };
 
   useEffect(() => {
-    if (!sourceMenuOpen && !modeMenuOpen && !filterMenuOpen) return undefined;
+    const textarea = queryTextareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [searchForm.query]);
+
+  const toggleSettingsMenu = () => {
+    setSettingsMenuOpen((isOpen) => {
+      if (isOpen) setSettingsBranch("");
+      return !isOpen;
+    });
+  };
+
+  useEffect(() => {
+    if (!settingsMenuOpen) return undefined;
     const handlePointerDown = (event) => {
-      if (sourceMenuRef.current && !sourceMenuRef.current.contains(event.target)) {
-        setSourceMenuOpen(false);
-      }
-      if (modeMenuRef.current && !modeMenuRef.current.contains(event.target)) {
-        setModeMenuOpen(false);
-      }
-      if (filterMenuRef.current && !filterMenuRef.current.contains(event.target)) {
-        setFilterMenuOpen(false);
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target)) {
+        setSettingsMenuOpen(false);
+        setSettingsBranch("");
       }
     };
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
-        setSourceMenuOpen(false);
-        setModeMenuOpen(false);
-        setFilterMenuOpen(false);
+        setSettingsMenuOpen(false);
+        setSettingsBranch("");
       }
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -112,161 +122,152 @@ export default function SearchFlowView({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [sourceMenuOpen, modeMenuOpen, filterMenuOpen]);
+  }, [settingsMenuOpen]);
 
   return (
     <section id="searchView" className="app-view search-flow-view is-active">
-      <div className="view-header">
-        <div>
+      <div className="view-header split-entry-hero split-entry-hero--flow">
+        <div className="split-entry-hero__copy">
           <p className="eyebrow">Search Flow</p>
           <h1>{t("search.title")}</h1>
           <p className="view-lead">{t("search.lead")}</p>
         </div>
-        <div className="search-header-actions">
-          <span className={`analysis-status ${searchStatusError ? "error" : ""}`} role="status" aria-live="polite">{visibleSearchStatus}</span>
-          {showStartNewFlow ? (
-            <button className="primary-button search-new-flow-button" type="button" onClick={onStartNewFlow}>{t("search.startNewFlow")}</button>
-          ) : null}
+        <div className="split-entry-hero__stage">
+          <div className="search-header-actions">
+            <span className={`analysis-status ${searchStatusError ? "error" : ""}`} role="status" aria-live="polite">{visibleSearchStatus}</span>
+            {showStartNewFlow ? (
+              <button className="primary-button search-new-flow-button" type="button" onClick={onStartNewFlow}>{t("search.startNewFlow")}</button>
+            ) : null}
+          </div>
+          <div className="split-entry-hero__dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
         </div>
       </div>
 
       <Stepper activeStep={activeStep} onStepChange={handleStepChange} t={t} />
 
       {activeStep === 1 ? (
-        <section className="panel flow-step is-active">
-          <div className="panel-header">
-            <div>
-              <h2>{t("search.step1Title")}</h2>
-              <p>{t("search.step1Body")}</p>
-            </div>
-          </div>
+        <section className="panel flow-step search-entry-panel is-active">
           <div className="panel-body">
             <div className="search-composer">
               <label className="search-field search-field-wide search-query-field">
                 <span>{t("search.query")}</span>
-                <textarea rows="4" value={searchForm.query} placeholder="low-resource medical image segmentation foundation model" onChange={(event) => onSearchFormChange("query", event.target.value)} />
+                <textarea ref={queryTextareaRef} rows="1" value={searchForm.query} placeholder="low-resource medical image segmentation foundation model" onChange={(event) => onSearchFormChange("query", event.target.value)} />
               </label>
               <div className="search-composer-toolbar">
                 <div className="search-toolbar-left">
-                  <div className={`source-app-menu ${sourceMenuOpen ? "is-open" : ""}`} ref={sourceMenuRef}>
+                  <div className={`standalone-options-menu ${settingsMenuOpen ? "is-open" : ""}`} ref={settingsMenuRef}>
                     <button
-                      className="source-app-trigger"
-                      type="button"
-                      aria-haspopup="menu"
-                      aria-expanded={sourceMenuOpen}
-                      onClick={() => {
-                        setModeMenuOpen(false);
-                        setFilterMenuOpen(false);
-                        setSourceMenuOpen((isOpen) => !isOpen);
-                      }}
-                    >
-                      <span className="source-app-grid-icon" aria-hidden="true">
-                        <i />
-                        <i />
-                        <i />
-                        <i />
-                      </span>
-                      <span className="source-app-trigger-label">{sourceButtonLabel}</span>
-                      <span className="source-app-chevron" aria-hidden="true" />
-                    </button>
-                    {sourceMenuOpen ? (
-                      <div className="source-app-popover" role="menu" aria-label={t("search.sources")}>
-                        <div className="source-app-popover-title">{t("search.sources")}</div>
-                        {sourceOptions.map(([value, label]) => {
-                          const checked = searchForm.sources.includes(value);
-                          const readableLabel = sourceLabel(label);
-                          return (
-                            <label className="source-app-option" role="menuitemcheckbox" aria-checked={checked} key={value}>
-                              <input type="checkbox" checked={checked} onChange={(event) => onToggleSource(value, event.target.checked)} />
-                              <span className={`source-app-mark source-app-mark--${value}`} aria-hidden="true">
-                                {readableLabel.slice(0, 1)}
-                              </span>
-                              <span className="source-app-name">{readableLabel}</span>
-                              <span className="source-app-connect">{checked ? sourceConnectionText.connected : sourceConnectionText.connect}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className={`source-app-menu mode-app-menu ${modeMenuOpen ? "is-open" : ""}`} ref={modeMenuRef}>
-                    <button
-                      className="source-app-trigger mode-app-trigger"
-                      type="button"
-                      aria-haspopup="menu"
-                      aria-expanded={modeMenuOpen}
-                      onClick={() => {
-                        setSourceMenuOpen(false);
-                        setFilterMenuOpen(false);
-                        setModeMenuOpen((isOpen) => !isOpen);
-                      }}
-                    >
-                      <span className={`mode-app-icon mode-app-mark--${selectedModeOption[0]}`} aria-hidden="true">{modeButtonLabel.slice(0, 1)}</span>
-                      <span className="source-app-trigger-label">{modeButtonLabel}</span>
-                      <span className="source-app-chevron" aria-hidden="true" />
-                    </button>
-                    {modeMenuOpen ? (
-                      <div className="source-app-popover mode-app-popover" role="menu" aria-label={t("search.mode")}>
-                        <div className="source-app-popover-title">{t("search.mode")}</div>
-                        {searchModeOptions.map(([value, label], index) => {
-                          const checked = searchForm.searchMode === value;
-                          const readableLabel = t(label);
-                          return (
-                            <label className="source-app-option mode-app-option" role="menuitemradio" aria-checked={checked} key={value}>
-                              <input
-                                type="radio"
-                                name="searchMode"
-                                checked={checked}
-                                onChange={() => {
-                                  onSearchFormChange("searchMode", value);
-                                  setModeMenuOpen(false);
-                                }}
-                              />
-                              <span className={`source-app-mark mode-app-mark mode-app-mark--${value}`} aria-hidden="true">
-                                {readableLabel.slice(0, 1) || index + 1}
-                              </span>
-                              <span className="source-app-name">{readableLabel}</span>
-                              <span className="source-app-connect">{checked ? modeChoiceText.selected : modeChoiceText.select}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className={`source-app-menu filter-app-menu ${filterMenuOpen ? "is-open" : ""}`} ref={filterMenuRef}>
-                    <button
-                      className="source-app-trigger filter-app-trigger"
+                      className="standalone-options-trigger"
                       type="button"
                       aria-haspopup="dialog"
-                      aria-expanded={filterMenuOpen}
-                      onClick={() => {
-                        setSourceMenuOpen(false);
-                        setModeMenuOpen(false);
-                        setFilterMenuOpen((isOpen) => !isOpen);
-                      }}
+                      aria-expanded={settingsMenuOpen}
+                      aria-label="Search settings"
+                      title="Search settings"
+                      onClick={toggleSettingsMenu}
                     >
-                      <span className="filter-app-icon" aria-hidden="true" />
-                      <span className="source-app-trigger-label">{filterLabel}</span>
-                      <span className="filter-app-summary">{filterSummary}</span>
-                      <span className="source-app-chevron" aria-hidden="true" />
+                      <span className="standalone-options-plus" aria-hidden="true" />
                     </button>
-                    {filterMenuOpen ? (
-                      <div className="source-app-popover filter-app-popover" role="dialog" aria-label={filterLabel}>
-                        <div className="source-app-popover-title">{filterLabel}</div>
-                        <label className="search-mini-field filter-mini-field">
-                          <span>{t("search.year")}</span>
-                          <input type="text" value={searchForm.year} placeholder="2022-2026" onChange={(event) => onSearchFormChange("year", event.target.value)} />
-                        </label>
-                        <label className="search-mini-field search-mini-field--limit filter-mini-field">
-                          <span>{t("search.limit")}</span>
-                          <input type="number" min="1" max="50" value={searchForm.limit} onChange={(event) => onSearchFormChange("limit", event.target.value)} />
-                        </label>
+                    {settingsMenuOpen ? (
+                      <div className={`standalone-options-popover ${settingsBranch ? "is-branch" : "is-root"}`} role="dialog" aria-label="Search settings">
+                        {!settingsBranch ? (
+                          <div className="standalone-options-branches">
+                            <button className="standalone-options-branch" type="button" onClick={() => setSettingsBranch("source")}>
+                              <span>{t("search.sources")}</span>
+                              <strong>{sourceButtonLabel}</strong>
+                              <i aria-hidden="true" />
+                            </button>
+                            <button className="standalone-options-branch" type="button" onClick={() => setSettingsBranch("mode")}>
+                              <span>{t("search.mode")}</span>
+                              <strong>{modeButtonLabel}</strong>
+                              <i aria-hidden="true" />
+                            </button>
+                            <button className="standalone-options-branch" type="button" onClick={() => setSettingsBranch("filter")}>
+                              <span>{filterLabel}</span>
+                              <strong>{filterSummary}</strong>
+                              <i aria-hidden="true" />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <button className="standalone-options-back" type="button" onClick={() => setSettingsBranch("")}>
+                              <span aria-hidden="true" />
+                              {settingsBranch === "source" ? t("search.sources") : settingsBranch === "mode" ? t("search.mode") : filterLabel}
+                            </button>
+                            {settingsBranch === "source" ? (
+                              <div className="standalone-options-section">
+                                {sourceOptions.map(([value, label]) => {
+                                  const checked = searchForm.sources.includes(value);
+                                  const readableLabel = sourceLabel(label);
+                                  return (
+                                    <label className="source-app-option" role="menuitemcheckbox" aria-checked={checked} key={value}>
+                                      <input type="checkbox" checked={checked} onChange={(event) => onToggleSource(value, event.target.checked)} />
+                                      <span className={`source-app-mark source-app-mark--${value}`} aria-hidden="true">
+                                        {readableLabel.slice(0, 1)}
+                                      </span>
+                                      <span className="source-app-name">{readableLabel}</span>
+                                      <span className="source-app-connect">{checked ? sourceConnectionText.connected : sourceConnectionText.connect}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                            {settingsBranch === "mode" ? (
+                              <div className="standalone-options-section">
+                                {searchModeOptions.map(([value, label], index) => {
+                                  const checked = searchForm.searchMode === value;
+                                  const readableLabel = t(label);
+                                  return (
+                                    <label className="source-app-option mode-app-option" role="menuitemradio" aria-checked={checked} key={value}>
+                                      <input
+                                        type="radio"
+                                        name="searchMode"
+                                        checked={checked}
+                                        onChange={() => onSearchFormChange("searchMode", value)}
+                                      />
+                                      <span className={`source-app-mark mode-app-mark mode-app-mark--${value}`} aria-hidden="true">
+                                        {readableLabel.slice(0, 1) || index + 1}
+                                      </span>
+                                      <span className="source-app-name">{readableLabel}</span>
+                                      <span className="source-app-connect">{checked ? modeChoiceText.selected : modeChoiceText.select}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                            {settingsBranch === "filter" ? (
+                              <div className="standalone-options-section">
+                                <label className="search-mini-field filter-mini-field">
+                                  <span>{t("search.year")}</span>
+                                  <input type="text" value={searchForm.year} placeholder="2022-2026" onChange={(event) => onSearchFormChange("year", event.target.value)} />
+                                </label>
+                                <label className="search-mini-field search-mini-field--limit filter-mini-field">
+                                  <span>{t("search.limit")}</span>
+                                  <input type="number" min="1" max="50" value={searchForm.limit} onChange={(event) => onSearchFormChange("limit", event.target.value)} />
+                                </label>
+                              </div>
+                            ) : null}
+                          </>
+                        )}
                       </div>
                     ) : null}
                   </div>
+                  <span className="search-composer-summary">{sourceButtonLabel}</span>
+                  <span className="search-composer-sources">{modeButtonLabel} / {filterSummary}</span>
                 </div>
-                <button className="search-submit-button" type="button" disabled={searchLoading} onClick={onSubmitSearch} aria-label={searchLoading ? t("search.searching") : t("search.submit")}>
-                  <span>{searchLoading ? t("search.searching") : t("search.submit")}</span>
+                <button
+                  className={`search-submit-button search-submit-button--icon ${submitButtonState}`}
+                  type="button"
+                  disabled={searchLoading}
+                  onClick={onSubmitSearch}
+                  aria-label={searchLoading ? t("search.searching") : t("search.submit")}
+                  title={searchLoading ? t("search.searching") : t("search.submit")}
+                >
+                  <span className={searchLoading ? "search-submit-stop" : "search-submit-arrow"} aria-hidden="true" />
+                  <span className="sr-only">{searchLoading ? t("search.searching") : t("search.submit")}</span>
                 </button>
               </div>
             </div>
@@ -280,12 +281,6 @@ export default function SearchFlowView({
 
       {activeStep === 2 ? (
         <section id="searchCandidatePanel" className="panel flow-step is-active" aria-live="polite">
-          <div className="panel-header candidate-panel-heading">
-            <div>
-              <h2>{t("search.step2Title")}</h2>
-              {!searchLoading ? <p className="candidate-meta">{candidateMeta}</p> : null}
-            </div>
-          </div>
           <div className="panel-body">
             {searchLoading ? (
               <LoadingState title={t("search.loadingTitle")} message={t("search.loadingMessage")} />
@@ -306,12 +301,6 @@ export default function SearchFlowView({
 
       {activeStep === 3 ? (
         <section className="panel flow-step is-active">
-          <div className="panel-header">
-            <div>
-              <h2>{t("search.step3Title")}</h2>
-              <p>{t("search.step3Body")}</p>
-            </div>
-          </div>
           <div className="panel-body">
             <StagedReferenceList references={stagedReferences} onRemove={onRemoveStaged} t={t} />
             <div className="form-actions">
@@ -324,7 +313,11 @@ export default function SearchFlowView({
                     onStepChange(4);
                     return;
                   }
-                  if (analysisRunning || hasAnalysisResult) {
+                  if (analysisRunning) {
+                    onStepChange(4);
+                    return;
+                  }
+                  if (hasAnalysisResult) {
                     onViewResults();
                     return;
                   }
@@ -340,13 +333,7 @@ export default function SearchFlowView({
       ) : null}
 
       {activeStep === 4 ? (
-        <section className="panel flow-step is-active">
-          <div className="panel-header">
-            <div>
-              <h2>{t("search.step4Title")}</h2>
-              <p>{t("search.step4Body")}</p>
-            </div>
-          </div>
+        <section className="panel flow-step search-analysis-panel is-active">
           <div className="panel-body">
             {analysisRunning ? (
               <LoadingState

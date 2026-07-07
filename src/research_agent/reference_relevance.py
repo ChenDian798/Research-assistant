@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from functools import lru_cache
 
 from .llm import LLMClient
@@ -210,6 +211,8 @@ Rules:
 - Mark off_topic only when it is clearly unrelated or clearly about a different condition/task/modality/population.
 - Be conservative: uncertain cases should be borderline, not off_topic.
 - Do not require exact words if standard synonyms or translations match the same biomedical concept.
+- If query_plan.query_intent is title, author+title, citation, or citation_with_title_author, judge primarily whether the candidate is the same bibliographic work, not ordinary topical relevance. Use extracted.title, extracted.authors, extracted.year, and retrieval_channel before topic concepts.
+- For title/author+title/citation identity searches, minor title typos, capitalization, punctuation, or word-form differences should remain relevant or borderline; do not reject a near-title match only because topic concepts are missing from the abstract.
 """.strip()
 
 SOCIETY_LLM_RELEVANCE_SYSTEM_PROMPT = """
@@ -236,6 +239,62 @@ Rules:
 - Mark off_topic only when it is clearly unrelated or clearly about a different population, institution, policy, behavior, method, geography, period, or outcome.
 - Be conservative: uncertain cases should be borderline, not off_topic.
 - Do not require exact words if standard synonyms, translations, or closely equivalent social-science constructs match the same concept.
+- If query_plan.query_intent is title, author+title, citation, or citation_with_title_author, judge primarily whether the candidate is the same bibliographic work, not ordinary topical relevance. Use extracted.title, extracted.authors, extracted.year, and retrieval_channel before topic concepts.
+- For title/author+title/citation identity searches, minor title typos, capitalization, punctuation, or word-form differences should remain relevant or borderline; do not reject a near-title match only because topic concepts are missing from the abstract.
+""".strip()
+COMPUTER_LLM_RELEVANCE_SYSTEM_PROMPT = """
+You are a strict but conservative computer-science and AI literature relevance reviewer.
+Your job is to decide whether each candidate is about the user's exact research topic.
+Return only valid JSON, no markdown.
+Schema:
+{
+  "decisions": [
+    {
+      "candidate_index": 0,
+      "topic_status": "relevant|borderline|off_topic",
+      "confidence": 0.0,
+      "matched_concepts": ["short concept"],
+      "missing_concepts": ["short concept"],
+      "reason": "brief reason"
+    }
+  ]
+}
+Rules:
+- Preserve the user's exact computer-science or AI intent, including task, method, model family, dataset, benchmark, metric, system, application domain, and constraints when specified.
+- Mark relevant only when the title/abstract/metadata clearly matches the topic.
+- Mark borderline when the candidate is plausibly useful but incomplete, broad, adjacent, or missing important technical details.
+- Mark off_topic only when it is clearly unrelated or clearly about a different task, method, model, system, dataset, benchmark, metric, or application domain.
+- Be conservative: uncertain cases should be borderline, not off_topic.
+- Do not require exact words if standard technical synonyms, abbreviations, translations, or closely equivalent CS/AI constructs match the same concept.
+- If query_plan.query_intent is title, author+title, citation, or citation_with_title_author, judge primarily whether the candidate is the same bibliographic work, not ordinary topical relevance. Use extracted.title, extracted.authors, extracted.year, and retrieval_channel before topic concepts.
+- For title/author+title/citation identity searches, minor title typos, capitalization, punctuation, or word-form differences should remain relevant or borderline; do not reject a near-title match only because topic concepts are missing from the abstract.
+""".strip()
+ENGINEERING_LLM_RELEVANCE_SYSTEM_PROMPT = """
+You are a strict but conservative engineering literature relevance reviewer.
+Your job is to decide whether each candidate is about the user's exact research topic.
+Return only valid JSON, no markdown.
+Schema:
+{
+  "decisions": [
+    {
+      "candidate_index": 0,
+      "topic_status": "relevant|borderline|off_topic",
+      "confidence": 0.0,
+      "matched_concepts": ["short concept"],
+      "missing_concepts": ["short concept"],
+      "reason": "brief reason"
+    }
+  ]
+}
+Rules:
+- Preserve the user's exact engineering intent, including system, material, process, design method, control strategy, optimization target, performance metric, application sector, operating condition, and constraints when specified.
+- Mark relevant only when the title/abstract/metadata clearly matches the topic.
+- Mark borderline when the candidate is plausibly useful but incomplete, broad, adjacent, or missing important engineering details.
+- Mark off_topic only when it is clearly unrelated or clearly about a different system, material, process, method, design, control target, performance metric, sector, or condition.
+- Be conservative: uncertain cases should be borderline, not off_topic.
+- Do not require exact words if standard engineering synonyms, abbreviations, translations, or closely equivalent applied-technology terms match the same concept.
+- If query_plan.query_intent is title, author+title, citation, or citation_with_title_author, judge primarily whether the candidate is the same bibliographic work, not ordinary topical relevance. Use extracted.title, extracted.authors, extracted.year, and retrieval_channel before topic concepts.
+- For title/author+title/citation identity searches, minor title typos, capitalization, punctuation, or word-form differences should remain relevant or borderline; do not reject a near-title match only because topic concepts are missing from the abstract.
 """.strip()
 
 
@@ -251,14 +310,24 @@ def apply_relevance_gate(query: str, screened: dict, *, query_plan: dict | None 
 
 
 def apply_rules_relevance_gate(query: str, screened: dict, *, query_plan: dict | None = None) -> dict:
-    if search_mode_from_query_plan(query_plan) == "society":
+    active_mode = search_mode_from_query_plan(query_plan)
+    if active_mode == "society":
         return apply_society_rules_relevance_gate(query, screened, query_plan=query_plan)
+    if active_mode in {"computer", "engineering"}:
+        return apply_technical_rules_relevance_gate(query, screened, query_plan=query_plan, domain=active_mode)
     profile = relevance_query_profile(query, query_plan=query_plan)
     if not profile["concepts"] and not profile["keywords"]:
         return screened
     gated = {"qualified": [], "needs_review": [], "rejected": list(screened.get("rejected", []))}
     for bucket in ("qualified", "needs_review"):
         for reference in screened.get(bucket, []):
+            title_match_status = title_intent_relevance_status(query, reference, query_plan=query_plan)
+            if title_match_status == "strong":
+                gated["qualified" if bucket == "qualified" else "needs_review"].append(mark_title_intent_relevant(reference))
+                continue
+            if title_match_status == "borderline":
+                gated["needs_review"].append(mark_title_intent_borderline(reference))
+                continue
             assessed = assess_reference_relevance(query, reference, profile=profile)
             status = assessed.get("topic_relevance_status")
             if status == "relevant":
@@ -282,6 +351,13 @@ def apply_society_rules_relevance_gate(query: str, screened: dict, *, query_plan
     gated = {"qualified": [], "needs_review": [], "rejected": list(screened.get("rejected", []))}
     for bucket in ("qualified", "needs_review"):
         for reference in screened.get(bucket, []):
+            title_match_status = title_intent_relevance_status(query, reference, query_plan=query_plan)
+            if title_match_status == "strong":
+                gated["qualified" if bucket == "qualified" else "needs_review"].append(mark_title_intent_relevant(reference))
+                continue
+            if title_match_status == "borderline":
+                gated["needs_review"].append(mark_title_intent_borderline(reference))
+                continue
             assessed = assess_society_reference_relevance(reference, profile=profile)
             status = assessed.get("topic_relevance_status")
             if status == "relevant":
@@ -322,7 +398,16 @@ def assess_society_reference_relevance(reference: dict, *, profile: dict) -> dic
     risks: list[str] = []
     status = "relevant"
     if missing_required:
-        status = "off_topic"
+        status = (
+            "borderline"
+            if missing_required_can_review(
+                domain="society",
+                missing_required=missing_required,
+                matched_concepts=matched_concepts,
+                lexical_score=lexical_score,
+            )
+            else "off_topic"
+        )
         risks.append("missing_required_social_concepts:" + ",".join(concept["label"] for concept in missing_required[:4]))
     elif lexical_score < society_relevance_min_lexical_score(profile):
         status = "borderline" if lexical_score >= 0.4 else "off_topic"
@@ -338,6 +423,363 @@ def assess_society_reference_relevance(reference: dict, *, profile: dict) -> dic
     return item
 
 
+def apply_technical_rules_relevance_gate(
+    query: str,
+    screened: dict,
+    *,
+    query_plan: dict | None = None,
+    domain: str,
+) -> dict:
+    profile = technical_query_profile(query, query_plan=query_plan, domain=domain)
+    if not profile["concepts"] and not profile["keywords"]:
+        return screened
+    gated = {"qualified": [], "needs_review": [], "rejected": list(screened.get("rejected", []))}
+    for bucket in ("qualified", "needs_review"):
+        for reference in screened.get(bucket, []):
+            title_match_status = title_intent_relevance_status(query, reference, query_plan=query_plan)
+            if title_match_status == "strong":
+                gated["qualified" if bucket == "qualified" else "needs_review"].append(mark_title_intent_relevant(reference))
+                continue
+            if title_match_status == "borderline":
+                gated["needs_review"].append(mark_title_intent_borderline(reference))
+                continue
+            assessed = assess_technical_reference_relevance(reference, profile=profile, domain=domain)
+            status = assessed.get("topic_relevance_status")
+            if status == "relevant":
+                gated["qualified" if bucket == "qualified" else "needs_review"].append(assessed)
+            elif status == "borderline":
+                assessed["screening_status"] = "needs_review"
+                assessed.setdefault("screening_risks", []).append("topic_relevance_borderline")
+                gated["needs_review"].append(assessed)
+            else:
+                assessed["screening_status"] = "rejected"
+                assessed.setdefault("screening_reasons", []).append("topic_relevance_failed")
+                assessed.setdefault("screening_risks", []).append("off_topic_reference")
+                gated["rejected"].append(assessed)
+    return gated
+
+
+def assess_technical_reference_relevance(reference: dict, *, profile: dict, domain: str) -> dict:
+    item = dict(reference or {})
+    text = reference_text(item)
+    matched_concepts = [
+        concept
+        for concept in profile["concepts"]
+        if any(normalized_contains(text, term) for term in concept["terms"])
+    ]
+    matched_ids = {concept["id"] for concept in matched_concepts}
+    missing_required = [
+        concept
+        for concept in profile["concepts"]
+        if concept["id"] not in matched_ids and concept.get("required")
+    ]
+    keyword_hits = [keyword for keyword in profile["keywords"] if normalized_contains(text, keyword)]
+    concept_score = len(matched_concepts) / max(1, len(profile["concepts"])) if profile["concepts"] else 0.0
+    keyword_score = len(keyword_hits) / max(1, len(profile["keywords"])) if profile["keywords"] else 0.0
+    lexical_score = max(concept_score, (concept_score * 0.85) + (keyword_score * 0.15)) if profile["concepts"] else keyword_score
+
+    reasons = [f"{domain}_concept_match:{concept['label']}" for concept in matched_concepts]
+    reasons.extend(f"keyword_match:{keyword}" for keyword in keyword_hits[:8])
+    risks: list[str] = []
+    status = "relevant"
+    if missing_required:
+        status = (
+            "borderline"
+            if missing_required_can_review(
+                domain=domain,
+                missing_required=missing_required,
+                matched_concepts=matched_concepts,
+                lexical_score=lexical_score,
+            )
+            else "off_topic"
+        )
+        risks.append(f"missing_required_{domain}_concepts:" + ",".join(concept["label"] for concept in missing_required[:4]))
+    elif lexical_score < technical_relevance_min_lexical_score(profile):
+        status = "borderline" if lexical_score >= 0.4 else "off_topic"
+        risks.append(f"low_{domain}_topic_overlap:{lexical_score:.3f}")
+
+    item["topic_relevance_status"] = status
+    item["topic_relevance_score"] = round(float(lexical_score), 4)
+    item["topic_relevance_reasons"] = reasons
+    item["topic_relevance_risks"] = risks
+    if risks:
+        existing = item.get("screening_risks") if isinstance(item.get("screening_risks"), list) else []
+        item["screening_risks"] = list(dict.fromkeys([*existing, *risks]))
+    return item
+
+
+def title_intent_relevance_match(query: str, reference: dict, *, query_plan: dict | None = None) -> bool:
+    return title_intent_relevance_status(query, reference, query_plan=query_plan) == "strong"
+
+
+def title_intent_relevance_status(query: str, reference: dict, *, query_plan: dict | None = None) -> str:
+    if not title_intent_query(query_plan):
+        return ""
+    candidate_title = str((reference or {}).get("title") or "")
+    if not candidate_title:
+        return ""
+    title_probe = title_intent_query_text(query, query_plan=query_plan)
+    similarity = title_similarity(title_probe, candidate_title)
+    author_required = bibliographic_authors_required(query_plan)
+    author_score = bibliographic_author_similarity(query_plan, reference)
+    if author_required and similarity >= 0.9 and author_score >= 0.45:
+        return "strong"
+    if author_required and similarity >= 0.82 and author_score >= 0.3:
+        return "borderline"
+    if author_required and similarity >= 0.75:
+        return "borderline"
+    retrieval_channel = str((reference or {}).get("retrieval_channel") or "")
+    if similarity >= 0.9 or (retrieval_channel == "exact_title" and similarity >= 0.75):
+        return "strong"
+    if similarity >= 0.68 or (retrieval_channel in {"exact_title", "fuzzy_title"} and similarity >= 0.6):
+        return "borderline"
+    return ""
+
+
+def title_intent_query(query_plan: dict | None) -> bool:
+    if not isinstance(query_plan, dict):
+        return False
+    intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
+    scores = intent.get("scores") if isinstance(intent.get("scores"), dict) else {}
+    query_intent = str(query_plan.get("query_intent") or "").strip().casefold()
+    return (
+        query_intent in {"title", "author+title", "citation", "citation_with_title_author"}
+        or str(intent.get("top_intent") or "").strip().casefold() == "title"
+        or str(intent.get("template") or "").strip().casefold() in {"title", "author+title", "citation_with_title_author"}
+        or float(scores.get("title") or 0.0) >= 0.65
+    )
+
+
+def title_intent_query_text(query: str, *, query_plan: dict | None = None) -> str:
+    if isinstance(query_plan, dict):
+        identity = query_plan.get("bibliographic_identity") if isinstance(query_plan.get("bibliographic_identity"), dict) else {}
+        if identity.get("title"):
+            return str(identity.get("title") or "")
+        extracted = query_plan.get("extracted") if isinstance(query_plan.get("extracted"), dict) else {}
+        if extracted.get("title"):
+            return str(extracted.get("title") or "")
+        intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
+        intent_extracted = intent.get("extracted") if isinstance(intent.get("extracted"), dict) else {}
+        if intent_extracted.get("title"):
+            return str(intent_extracted.get("title") or "")
+    return str(query or "")
+
+
+def bibliographic_authors_required(query_plan: dict | None) -> bool:
+    if not isinstance(query_plan, dict):
+        return False
+    query_intent = str(query_plan.get("query_intent") or "").strip().casefold()
+    if query_intent not in {"author+title", "citation", "citation_with_title_author"}:
+        return False
+    return bool(bibliographic_query_authors(query_plan))
+
+
+def bibliographic_query_authors(query_plan: dict | None) -> list[str]:
+    if not isinstance(query_plan, dict):
+        return []
+    identity = query_plan.get("bibliographic_identity") if isinstance(query_plan.get("bibliographic_identity"), dict) else {}
+    authors = identity.get("authors")
+    if isinstance(authors, list) and authors:
+        return clean_string_list(authors, limit=8)
+    extracted = query_plan.get("extracted") if isinstance(query_plan.get("extracted"), dict) else {}
+    authors = extracted.get("authors")
+    if isinstance(authors, list) and authors:
+        return clean_string_list(authors, limit=8)
+    intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
+    intent_extracted = intent.get("extracted") if isinstance(intent.get("extracted"), dict) else {}
+    return clean_string_list(intent_extracted.get("authors"), limit=8)
+
+
+def bibliographic_author_similarity(query_plan: dict | None, reference: dict) -> float:
+    authors = bibliographic_query_authors(query_plan)
+    if not authors:
+        return 0.0
+    reference_authors = normalize_text(str((reference or {}).get("authors") or ""))
+    if not reference_authors:
+        return 0.0
+    best = 0.0
+    for author in authors:
+        author_norm = normalize_text(author)
+        if author_norm and normalized_contains(reference_authors, author_norm):
+            best = max(best, 1.0)
+            continue
+        tokens = {token for token in re.findall(r"[a-z][a-z'.-]+", author_norm) if len(token) > 1}
+        ref_tokens = {token for token in re.findall(r"[a-z][a-z'.-]+", reference_authors) if len(token) > 1}
+        if tokens and ref_tokens:
+            best = max(best, len(tokens & ref_tokens) / max(1, len(tokens)))
+    return min(1.0, best)
+
+
+def mark_title_intent_relevant(reference: dict) -> dict:
+    item = dict(reference or {})
+    item["topic_relevance_status"] = "relevant"
+    item["topic_relevance_score"] = 1.0
+    append_unique(item, "topic_relevance_reasons", "exact_title_match")
+    return item
+
+
+def mark_title_intent_borderline(reference: dict) -> dict:
+    item = dict(reference or {})
+    item["screening_status"] = "needs_review"
+    item["topic_relevance_status"] = "borderline"
+    item["topic_relevance_score"] = max(float(item.get("topic_relevance_score") or 0.0), 0.6)
+    append_unique(item, "screening_risks", "title_intent_needs_review")
+    append_unique(item, "topic_relevance_reasons", "near_title_match")
+    return item
+
+
+def title_similarity(query_title: str, candidate_title: str) -> float:
+    query_norm = normalize_title(query_title)
+    candidate_norm = normalize_title(candidate_title)
+    if not query_norm or not candidate_norm:
+        return 0.0
+    if query_norm == candidate_norm:
+        return 1.0
+    if query_norm in candidate_norm or candidate_norm in query_norm:
+        return 0.92
+    query_tokens = title_tokens(query_norm)
+    candidate_tokens = title_tokens(candidate_norm)
+    token_score = 0.0
+    if query_tokens and candidate_tokens:
+        token_score = len(query_tokens & candidate_tokens) / max(1, max(len(query_tokens), len(candidate_tokens)))
+    char_score = SequenceMatcher(None, query_norm, candidate_norm).ratio()
+    return max(token_score, char_score)
+
+
+def normalize_title(value: str) -> str:
+    return re.sub(r"\W+", " ", str(value or "").casefold()).strip()
+
+
+def title_tokens(value: str) -> set[str]:
+    stopwords = {"a", "an", "and", "the", "of", "for", "to"}
+    return {token for token in re.findall(r"[a-z0-9][a-z0-9+-]*|[\u4e00-\u9fff]+", value.casefold()) if token not in stopwords}
+
+
+REVIEWABLE_MISSING_REQUIRED_CONFIG = {
+    "biomedical": {
+        "reviewable_terms": {
+            "assessment",
+            "classification",
+            "control",
+            "diagnosis",
+            "detection",
+            "evaluation",
+            "intervention",
+            "management",
+            "method",
+            "model",
+            "outcome",
+            "prediction",
+            "prevention",
+            "prognosis",
+            "risk",
+            "screening",
+            "segmentation",
+            "therapy",
+            "treatment",
+        },
+        "hard_categories": {"anatomy", "condition", "modality", "population", "target"},
+        "min_matched_concepts": 1,
+        "min_lexical_score": 0.5,
+    },
+    "computer": {
+        "reviewable_terms": {
+            "accuracy",
+            "algorithm",
+            "assessment",
+            "baseline",
+            "benchmark",
+            "dataset",
+            "evaluation",
+            "experiment",
+            "metric",
+            "method",
+            "model",
+            "performance",
+            "ranking",
+            "retrieval",
+            "test",
+        },
+        "hard_categories": {"application", "domain", "object", "system", "task"},
+        "min_matched_concepts": 2,
+        "min_lexical_score": 0.5,
+    },
+    "engineering": {
+        "reviewable_terms": {
+            "algorithm",
+            "assessment",
+            "control",
+            "detection",
+            "diagnosis",
+            "estimation",
+            "forecast",
+            "forecasting",
+            "method",
+            "model",
+            "modeling",
+            "modelling",
+            "optimization",
+            "optimisation",
+            "prediction",
+            "simulation",
+        },
+        "hard_categories": {"application", "condition", "material", "process", "sector", "system"},
+        "min_matched_concepts": 2,
+        "min_lexical_score": 0.65,
+        "allow_single_match_if_score": 0.65,
+    },
+    "society": {
+        "reviewable_terms": {
+            "assessment",
+            "effect",
+            "evaluation",
+            "governance",
+            "impact",
+            "management",
+            "mechanism",
+            "method",
+            "model",
+            "outcome",
+            "policy",
+            "regulation",
+            "theory",
+        },
+        "hard_categories": {"geography", "institution", "phenomenon", "population"},
+        "min_matched_concepts": 2,
+        "min_lexical_score": 0.5,
+    },
+}
+
+
+def missing_required_can_review(
+    *,
+    domain: str,
+    missing_required: list[dict],
+    matched_concepts: list[dict],
+    lexical_score: float,
+) -> bool:
+    config = REVIEWABLE_MISSING_REQUIRED_CONFIG.get(domain)
+    if not config or not missing_required:
+        return False
+    min_matched = int(config.get("min_matched_concepts", 2))
+    min_score = float(config.get("min_lexical_score", 0.5))
+    allow_single_score = config.get("allow_single_match_if_score")
+    if len(matched_concepts) < min_matched:
+        if allow_single_score is None or len(matched_concepts) < 1 or lexical_score < float(allow_single_score):
+            return False
+    if lexical_score < min_score:
+        return False
+    hard_categories = set(config.get("hard_categories") or [])
+    reviewable_terms = set(config.get("reviewable_terms") or [])
+    for concept in missing_required:
+        if str(concept.get("category") or "").casefold() in hard_categories:
+            return False
+        label = str(concept.get("label") or "").casefold()
+        if not any(term in label for term in reviewable_terms):
+            return False
+    return True
+
+
 def apply_llm_relevance_gate(query: str, screened: dict, *, query_plan: dict | None = None) -> dict | None:
     if not should_use_llm_relevance_gate():
         return None
@@ -350,7 +792,7 @@ def apply_llm_relevance_gate(query: str, screened: dict, *, query_plan: dict | N
         return None
     if not decisions:
         return None
-    return apply_llm_relevance_decisions(screened, candidates, decisions)
+    return apply_llm_relevance_decisions(screened, candidates, decisions, query=query, query_plan=query_plan)
 
 
 def relevance_gate_candidates(screened: dict) -> list[dict]:
@@ -373,11 +815,11 @@ def relevance_gate_candidates(screened: dict) -> list[dict]:
 
 def llm_relevance_decisions(query: str, candidates: list[dict], *, query_plan: dict | None = None) -> dict[int, dict]:
     timeout = bounded_float_env("PAPER_RELEVANCE_LLM_TIMEOUT_SECONDS", 25.0, minimum=3.0, maximum=90.0)
-    system_prompt = (
-        SOCIETY_LLM_RELEVANCE_SYSTEM_PROMPT
-        if search_mode_from_query_plan(query_plan) == "society"
-        else LLM_RELEVANCE_SYSTEM_PROMPT
-    )
+    system_prompt = {
+        "society": SOCIETY_LLM_RELEVANCE_SYSTEM_PROMPT,
+        "computer": COMPUTER_LLM_RELEVANCE_SYSTEM_PROMPT,
+        "engineering": ENGINEERING_LLM_RELEVANCE_SYSTEM_PROMPT,
+    }.get(search_mode_from_query_plan(query_plan), LLM_RELEVANCE_SYSTEM_PROMPT)
     content = asyncio.run(
         asyncio.wait_for(
             LLMClient().complete(
@@ -420,17 +862,24 @@ def llm_relevance_user_prompt(query: str, candidates: list[dict], *, query_plan:
     compact_candidates = []
     for candidate in candidates:
         reference = candidate["reference"]
-        compact_candidates.append(
-            {
-                "candidate_index": candidate["candidate_index"],
-                "title": str(reference.get("title") or "")[:400],
-                "abstract": str(reference.get("abstract") or "")[:900],
-                "journal": str(reference.get("journal") or reference.get("source_label") or "")[:160],
-                "year": str(reference.get("year") or "")[:20],
-                "doi": str(reference.get("doi") or "")[:160],
-                "source": str(reference.get("source") or "")[:240],
-            }
-        )
+        candidate_payload = {
+            "candidate_index": candidate["candidate_index"],
+            "title": str(reference.get("title") or "")[:400],
+            "authors": str(reference.get("authors") or "")[:300],
+            "abstract": str(reference.get("abstract") or "")[:900],
+            "journal": str(reference.get("journal") or reference.get("source_label") or "")[:160],
+            "year": str(reference.get("year") or "")[:20],
+            "doi": str(reference.get("doi") or "")[:160],
+            "source": str(reference.get("source") or "")[:240],
+            "retrieval_channel": str(reference.get("retrieval_channel") or "")[:80],
+        }
+        if title_intent_query(query_plan):
+            candidate_payload["title_similarity_to_query"] = round(
+                title_similarity(title_intent_query_text(query, query_plan=query_plan), candidate_payload["title"]),
+                4,
+            )
+            candidate_payload["author_similarity_to_query"] = round(bibliographic_author_similarity(query_plan, reference), 4)
+        compact_candidates.append(candidate_payload)
     payload = {
         "original_query": str(query or ""),
         "query_plan": compact_query_plan(query_plan),
@@ -450,6 +899,9 @@ def compact_query_plan(query_plan: dict | None) -> dict:
         "rules_fallback_query",
         "search_mode",
         "requested_search_mode",
+        "query_intent",
+        "intent_confidence",
+        "extracted",
         "core_concepts",
         "synonyms",
         "forbidden_broadenings",
@@ -465,15 +917,41 @@ def search_mode_from_query_plan(query_plan: dict | None) -> str:
     if not isinstance(query_plan, dict):
         return "biomedical"
     mode = str(query_plan.get("search_mode") or "").strip().casefold()
-    return "society" if mode in {"society", "social", "social_science", "social-science"} else "biomedical"
+    aliases = {
+        "society": "society",
+        "social": "society",
+        "social_science": "society",
+        "social-science": "society",
+        "computer": "computer",
+        "computer_science": "computer",
+        "computer-science": "computer",
+        "cs": "computer",
+        "ai": "computer",
+        "artificial_intelligence": "computer",
+        "artificial-intelligence": "computer",
+        "engineering": "engineering",
+        "eng": "engineering",
+    }
+    return aliases.get(mode, "biomedical")
 
 
-def apply_llm_relevance_decisions(screened: dict, candidates: list[dict], decisions: dict[int, dict]) -> dict:
+def apply_llm_relevance_decisions(
+    screened: dict,
+    candidates: list[dict],
+    decisions: dict[int, dict],
+    *,
+    query: str = "",
+    query_plan: dict | None = None,
+) -> dict:
     gated = {"qualified": [], "needs_review": [], "rejected": list(screened.get("rejected", []))}
     min_confidence = bounded_float_env("PAPER_RELEVANCE_LLM_MIN_CONFIDENCE", 0.65, minimum=0.0, maximum=1.0)
     reject_confidence = bounded_float_env("PAPER_RELEVANCE_LLM_REJECT_CONFIDENCE", 0.75, minimum=0.0, maximum=1.0)
     for candidate in candidates:
         reference = dict(candidate["reference"])
+        if title_intent_relevance_match(query, reference, query_plan=query_plan):
+            target_bucket = "qualified" if candidate["source_bucket"] == "qualified" else "needs_review"
+            gated[target_bucket].append(mark_title_intent_relevant(reference))
+            continue
         decision = decisions.get(candidate["candidate_index"])
         if not decision:
             reference["screening_status"] = "needs_review"
@@ -520,7 +998,38 @@ def apply_llm_relevance_decisions(screened: dict, candidates: list[dict], decisi
 
 
 def relevance_query_profile(query: str, *, query_plan: dict | None = None) -> dict:
-    return query_profile(relevance_query_text(query, query_plan=query_plan))
+    text = relevance_query_text(query, query_plan=query_plan)
+    profile = query_profile(text)
+    plan_concepts = biomedical_query_plan_concepts(query_plan)
+    if not plan_concepts:
+        return profile
+
+    concepts = list(profile["concepts"])
+    seen = {
+        normalize_text(str(term))
+        for concept in concepts
+        for term in concept.get("terms", [])
+        if str(term or "").strip()
+    }
+    for concept in plan_concepts:
+        label_key = normalize_text(concept["label"])
+        if label_key in seen:
+            continue
+        concepts.append(concept)
+        seen.update(normalize_text(str(term)) for term in concept.get("terms", []) if str(term or "").strip())
+
+    required_categories = set(profile["required_categories"])
+    required_categories.update(
+        concept["category"]
+        for concept in plan_concepts
+        if concept.get("required") and concept.get("category")
+    )
+    return {
+        **profile,
+        "concepts": concepts[:12],
+        "required_categories": required_categories,
+        "is_medical": True,
+    }
 
 
 def relevance_query_text(query: str, *, query_plan: dict | None = None) -> str:
@@ -542,6 +1051,115 @@ def relevance_query_text(query: str, *, query_plan: dict | None = None) -> str:
     if not parts:
         parts.append(str(query or "").strip())
     return " ".join(dict.fromkeys(part for part in parts if part))
+
+
+def biomedical_query_plan_concepts(query_plan: dict | None) -> list[dict]:
+    if not isinstance(query_plan, dict):
+        return []
+    concepts = []
+    seen = set()
+    for index, value in enumerate(query_plan.get("core_concepts") or []):
+        if isinstance(value, dict):
+            label = str(value.get("concept") or value.get("term") or value.get("name") or "").strip()
+            category = biomedical_concept_category(label, explicit_type=value.get("type"))
+            required = bool(value.get("must_keep", True))
+        else:
+            label = str(value or "").strip()
+            category = biomedical_concept_category(label)
+            required = True
+        if not label:
+            continue
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        concepts.append(
+            {
+                "id": f"plan_biomedical_{index}",
+                "label": label,
+                "category": category,
+                "terms": biomedical_concept_terms(label),
+                "required": required,
+            }
+        )
+    return concepts
+
+
+def biomedical_concept_terms(label: str) -> list[str]:
+    terms = [label]
+    lower = label.casefold()
+    synonym_groups = [
+        ["dental caries", "tooth decay", "caries", "cavity"],
+        ["prevention", "preventive", "preventative", "prophylaxis"],
+        ["diagnosis", "diagnostic", "classification"],
+        ["prediction", "predictive", "prognosis", "prognostic"],
+        ["treatment", "therapy", "therapeutic"],
+    ]
+    for group in synonym_groups:
+        if any(term in lower for term in group):
+            terms.extend(group)
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def biomedical_concept_category(label: str, *, explicit_type=None) -> str:
+    explicit = str(explicit_type or "").strip().casefold()
+    if explicit in {"condition", "disease", "disorder", "diagnosis"}:
+        return "condition"
+    if explicit in {"population", "patient", "people", "cohort"}:
+        return "population"
+    if explicit in {"modality", "imaging", "test"}:
+        return "modality"
+    if explicit in {"target", "anatomy", "organ", "site"}:
+        return "target"
+    if explicit in {"method", "model", "algorithm"}:
+        return "method"
+    if explicit in {"task", "intervention"}:
+        return "task"
+    if explicit in {"outcome", "endpoint", "metric"}:
+        return "outcome"
+
+    lower = label.casefold()
+    if any(term in lower for term in ("patient", "population", "children", "child", "adult", "elderly", "women")):
+        return "population"
+    if any(term in lower for term in ("ct", "mri", "ultrasound", "x-ray", "xray", "imaging", "radiograph")):
+        return "modality"
+    if any(term in lower for term in ("lesion", "tumor", "tumour", "nodule", "organ", "tissue", "tooth", "teeth")):
+        return "target"
+    if any(
+        term in lower
+        for term in (
+            "cancer",
+            "caries",
+            "disease",
+            "disorder",
+            "infection",
+            "stroke",
+            "syndrome",
+            "diabetes",
+            "arthritis",
+        )
+    ):
+        return "condition"
+    if any(term in lower for term in ("model", "method", "algorithm", "machine learning", "deep learning")):
+        return "method"
+    if any(
+        term in lower
+        for term in (
+            "classification",
+            "control",
+            "detection",
+            "diagnosis",
+            "prediction",
+            "prevention",
+            "screening",
+            "segmentation",
+            "treatment",
+        )
+    ):
+        return "task"
+    if any(term in lower for term in ("mortality", "survival", "outcome", "risk", "endpoint")):
+        return "outcome"
+    return "topic"
 
 
 def society_query_profile(query: str, *, query_plan: dict | None = None) -> dict:
@@ -603,6 +1221,92 @@ def society_concept_terms(label: str) -> list[str]:
 
 
 def society_relevance_min_lexical_score(profile: dict) -> float:
+    concept_count = len(profile.get("concepts") or [])
+    if concept_count >= 5:
+        return 0.55
+    if concept_count >= 3:
+        return 0.5
+    return 0.45
+
+
+def technical_query_profile(query: str, *, query_plan: dict | None = None, domain: str) -> dict:
+    concept_inputs: list[tuple[str, bool]] = []
+    if isinstance(query_plan, dict):
+        for value in query_plan.get("core_concepts") or []:
+            if isinstance(value, dict):
+                text = str(value.get("concept") or value.get("term") or value.get("name") or "").strip()
+                required = bool(value.get("must_keep", True))
+            else:
+                text = str(value or "").strip()
+                required = True
+            if text:
+                concept_inputs.append((text, required))
+        for value in query_plan.get("synonyms") or []:
+            text = str(value or "").strip()
+            if text:
+                concept_inputs.append((text, False))
+
+    if not concept_inputs:
+        text = relevance_query_text(query, query_plan=query_plan)
+        for keyword in query_keywords(normalize_text(text)):
+            concept_inputs.append((keyword, True))
+
+    concepts = []
+    seen = set()
+    for index, (label, required) in enumerate(concept_inputs[:16]):
+        clean = re.sub(r"\s+", " ", label).strip()
+        if not clean:
+            continue
+        key = clean.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms = technical_concept_terms(clean, domain=domain)
+        concepts.append({"id": f"{domain}_{index}", "label": clean, "terms": terms, "required": required})
+
+    keywords = query_keywords(normalize_text(relevance_query_text(query, query_plan=query_plan)))
+    return {"concepts": concepts[:12], "keywords": keywords[:10]}
+
+
+def technical_concept_terms(label: str, *, domain: str) -> list[str]:
+    terms = [label]
+    lower = label.casefold()
+    common_groups = [
+        ["artificial intelligence", "ai"],
+        ["machine learning", "ml"],
+        ["deep learning", "neural network", "neural networks"],
+        ["large language model", "llm", "language model"],
+        ["retrieval augmented generation", "rag"],
+        ["natural language processing", "nlp"],
+        ["computer vision", "image analysis"],
+        ["optimization", "optimisation"],
+        ["fault diagnosis", "fault detection"],
+    ]
+    computer_groups = [
+        ["privacy", "differential privacy"],
+        ["security", "cybersecurity"],
+        ["software engineering", "software development"],
+        ["database", "data management"],
+        ["distributed system", "distributed systems"],
+    ]
+    engineering_groups = [
+        ["battery", "lithium-ion battery", "li-ion battery"],
+        ["control", "controller", "control system"],
+        ["materials", "material"],
+        ["manufacturing", "machining"],
+        ["renewable energy", "energy"],
+        ["structural engineering", "structure", "structural"],
+        ["concrete", "cementitious"],
+        ["thermal", "heat transfer"],
+    ]
+    groups = common_groups + (engineering_groups if domain == "engineering" else computer_groups)
+    for group in groups:
+        if any(term in lower for term in group):
+            terms.extend(group)
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def technical_relevance_min_lexical_score(profile: dict) -> float:
     concept_count = len(profile.get("concepts") or [])
     if concept_count >= 5:
         return 0.55
@@ -755,7 +1459,16 @@ def assess_reference_relevance(query: str, reference: dict, *, profile: dict | N
             if concept["category"] in profile["required_categories"]
         ]
         if missing_required:
-            status = "off_topic"
+            status = (
+                "borderline"
+                if missing_required_can_review(
+                    domain="biomedical",
+                    missing_required=missing_required,
+                    matched_concepts=matched_concepts,
+                    lexical_score=lexical_score,
+                )
+                else "off_topic"
+            )
             risks.append("missing_required_topic_concepts:" + ",".join(concept["id"] for concept in missing_required))
         elif lexical_score < relevance_min_lexical_score(profile):
             status = "borderline" if lexical_score >= 0.45 else "off_topic"

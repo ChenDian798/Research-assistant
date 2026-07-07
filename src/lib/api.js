@@ -1,4 +1,4 @@
-import { assertUploadSize, buildLiteratureUserContext } from "./formatters.js";
+﻿import { assertUploadSize, buildLiteratureUserContext } from "./formatters.js";
 
 const appBasePath = (window.location.pathname.match(/^\/v\d+(?=\/|$)/) || [""])[0];
 
@@ -12,12 +12,31 @@ export async function readJsonResponse(response) {
   try {
     return JSON.parse(responseText);
   } catch (error) {
-    throw new Error(`服务返回了无法解析的数据：${responseText.slice(0, 160)}`);
+    if (response.status === 413) {
+      throw new Error("上传文件过大，服务器拒绝接收。请减少文件大小或分批上传。");
+    }
+    const plainText = responseText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    throw new Error(`服务返回了无法解析的数据：${plainText.slice(0, 160) || responseText.slice(0, 160)}`);
   }
 }
 
 export async function submitLiteratureSearchRequest(payload) {
   const response = await fetch(apiPath("/api/literature-search"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.payload = data;
+    throw error;
+  }
+  return data;
+}
+
+export async function submitNoveltyCheckRequest(payload) {
+  const response = await fetch(apiPath("/api/novelty-check"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -52,7 +71,11 @@ export async function deleteHistoryEntry(historyId) {
   return data;
 }
 
-export async function submitLiteratureAnalysis({ topic = "literature-analysis", references = [], finalReport = "", historySource = "direct", historyId = "" } = {}) {
+function normalizeOutputLanguage(language) {
+  return language === "en" ? "en" : "zh";
+}
+
+export async function submitLiteratureAnalysis({ topic = "literature-analysis", references = [], finalReport = "", historySource = "direct", historyId = "", outputLanguage = "zh" } = {}) {
   return fetch(apiPath("/api/literature-analysis"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -62,11 +85,12 @@ export async function submitLiteratureAnalysis({ topic = "literature-analysis", 
       final_report: finalReport,
       history_source: historySource,
       history_id: historyId,
+      output_language: normalizeOutputLanguage(outputLanguage),
     }),
   });
 }
 
-export async function submitLinkLiteratureAnalysis(references, userContext = "", topic = "literature-analysis", analysisSource = "direct", historyId = "") {
+export async function submitLinkLiteratureAnalysis(references, userContext = "", topic = "literature-analysis", analysisSource = "direct", historyId = "", outputLanguage = "zh") {
   const fallback = analysisSource === "search"
     ? "The user selected these references from the literature search flow for final literature analysis."
     : "The user provided DOI identifiers or literature links directly in the literature assistant.";
@@ -76,16 +100,18 @@ export async function submitLinkLiteratureAnalysis(references, userContext = "",
     finalReport: buildLiteratureUserContext(userContext, fallback),
     historySource: analysisSource,
     historyId,
+    outputLanguage,
   });
 }
 
-export async function submitCombinedLiteratureAnalysis(references, pdfFiles, userContext = "", topic = "literature-analysis", historySource = "direct") {
+export async function submitCombinedLiteratureAnalysis(references, pdfFiles, userContext = "", topic = "literature-analysis", historySource = "direct", outputLanguage = "zh") {
   assertUploadSize(pdfFiles);
   const formData = new FormData();
   formData.append("topic", topic);
   formData.append("references", JSON.stringify(references));
   formData.append("user_context", userContext);
   formData.append("history_source", historySource);
+  formData.append("output_language", normalizeOutputLanguage(outputLanguage));
   pdfFiles.forEach((file) => formData.append("pdf", file));
   return fetch(apiPath("/api/literature-analysis/pdf"), { method: "POST", body: formData });
 }
@@ -113,6 +139,9 @@ function translateJobStage(stage, t) {
     "Running LLM literature analysis...": translate("job.runningAnalysis", t),
     "Searching literature...": translate("history.searchLoadingTitle", t),
     "Search complete": translate("history.searchComplete", t),
+    "Planning novelty search...": translate("job.planningNovelty", t),
+    "Assessing novelty overlap...": translate("job.assessingNovelty", t),
+    "Novelty check complete": translate("job.noveltyComplete", t),
   };
   return stageMap[text] || text;
 }
@@ -126,6 +155,9 @@ function translate(key, t, params) {
     "job.starting": "正在启动文献分析...",
     "job.resolvingDoi": "正在补全文献元数据...",
     "job.runningAnalysis": "正在运行文献分析...",
+    "job.planningNovelty": "Planning novelty search...",
+    "job.assessingNovelty": "Assessing novelty overlap...",
+    "job.noveltyComplete": "Novelty check complete.",
   }[key];
   return typeof fallback === "function" ? fallback(params || {}) : fallback;
 }

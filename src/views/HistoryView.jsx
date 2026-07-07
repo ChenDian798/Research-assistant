@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import AnalysisTable from "../components/AnalysisTable.jsx";
 import LiteratureSummary from "../components/LiteratureSummary.jsx";
 import LoadingState from "../components/LoadingState.jsx";
-import { normalizeLiteratureSummary } from "../lib/formatters.js";
+import ReferenceLink from "../components/ReferenceLink.jsx";
+import { NoveltyReport } from "./NoveltyCheckView.jsx";
+import { normalizeLiteratureSummary, referenceIdentifierText } from "../lib/formatters.js";
 
 export default function HistoryView({
   entries,
@@ -93,7 +95,19 @@ function selectedVisibleEntry(selectedEntry, entries) {
     status: visibleEntry.status || selectedEntry.status,
     stage: visibleEntry.stage || selectedEntry.stage,
     job_id: visibleEntry.job_id || selectedEntry.job_id,
-    analysis: visibleEntry.analysis || selectedEntry.analysis,
+    analysis: mergeFlowAnalysis(selectedEntry.analysis, visibleEntry.analysis),
+  };
+}
+
+function mergeFlowAnalysis(detailAnalysis, summaryAnalysis) {
+  if (!detailAnalysis) return summaryAnalysis;
+  if (!summaryAnalysis) return detailAnalysis;
+  return {
+    ...detailAnalysis,
+    ...summaryAnalysis,
+    request: detailAnalysis.request || summaryAnalysis.request || {},
+    result: detailAnalysis.result || summaryAnalysis.result || {},
+    counts: summaryAnalysis.counts || detailAnalysis.counts || {},
   };
 }
 
@@ -142,6 +156,7 @@ function mergeHistoryEntries(entries) {
 function HistoryDetail({ entry, onResubmitEntry, onContinueEntry, t }) {
   const isAnalysis = entry.kind === "direct_analysis" || entry.kind === "search_analysis";
   const isSearch = entry.kind === "literature_search" || entry.kind === "search_flow";
+  const isNovelty = entry.kind === "novelty_check";
   const request = entry.request || {};
   const result = entry.result || {};
   const references = Array.isArray(request.references) ? request.references : [];
@@ -200,7 +215,6 @@ function HistoryDetail({ entry, onResubmitEntry, onContinueEntry, t }) {
           <button className="primary-button" type="button" onClick={() => onContinueEntry(entry)}>
             {t("history.continueFlow")}
           </button>
-          <span>{t("history.continueFlowHint")}</span>
         </div>
       ) : null}
 
@@ -233,6 +247,7 @@ function HistoryDetail({ entry, onResubmitEntry, onContinueEntry, t }) {
       ) : null}
 
       {isSearch ? <SearchHistoryDetail entry={entry} mode={searchMode} t={t} /> : null}
+      {isNovelty ? <NoveltyHistoryDetail entry={entry} t={t} /> : null}
       {flowAnalysis ? (
         <div className="history-flow-analysis">
           <h3>{t("history.analysisSection")}</h3>
@@ -249,6 +264,39 @@ function HistoryDetail({ entry, onResubmitEntry, onContinueEntry, t }) {
       ) : null}
     </div>
   );
+}
+
+function NoveltyHistoryDetail({ entry, t }) {
+  const result = entry.result || {};
+  const request = entry.request || {};
+  const mode = noveltyHistoryMode(entry);
+  return (
+    <>
+      <div className="history-meta-grid">
+        <MetaItem label={t("novelty.claimLabel")} value={request.innovation_text || result.innovation_text || entry.title} />
+        <MetaItem label={t("history.sources")} value={request.sources || result.search?.sources_used?.join(", ") || "-"} />
+        <MetaItem label={t("history.searchMode")} value={request.search_mode || result.search?.search_mode || "-"} />
+        <MetaItem label={t("history.jobId")} value={entry.job_id || "-"} />
+      </div>
+      {mode === "loading" ? (
+        <LoadingState title={t("novelty.loadingTitle")} message={t("novelty.loadingBody")} />
+      ) : mode === "error" || mode === "interrupted" ? (
+        <div className="history-empty">{entry.error || t("table.analysisFailed")}</div>
+      ) : (
+        <NoveltyReport result={result} t={t} />
+      )}
+    </>
+  );
+}
+
+function noveltyHistoryMode(entry) {
+  const result = entry?.result || {};
+  const comparisons = Array.isArray(result.comparisons) ? result.comparisons : [];
+  if (comparisons.length || result.overall) return "done";
+  if (entry?.stage === "Task interrupted") return "interrupted";
+  if (entry?.status === "running" || entry?.status === "queued") return "loading";
+  if (entry?.status === "error") return "error";
+  return entry?.status === "done" ? "done" : "idle";
 }
 
 function historyAnalysisMode(status, result, reviewNeededDocuments = [], stage = "") {
@@ -269,7 +317,8 @@ function searchHistoryMode(entry) {
   const result = entry?.result || {};
   const qualified = Array.isArray(result.qualified_references) ? result.qualified_references : [];
   const needsReview = Array.isArray(result.needs_review_references) ? result.needs_review_references : [];
-  if (qualified.length || needsReview.length || result.status === "done" || entry?.stage === "Search complete") {
+  const rejected = Array.isArray(result.rejected_references) ? result.rejected_references : [];
+  if (qualified.length || needsReview.length || rejected.length || result.status === "done" || entry?.stage === "Search complete") {
     return "done";
   }
   if (entry?.status === "error") return "error";
@@ -294,7 +343,13 @@ function SearchHistoryDetail({ entry, mode, t }) {
   const result = entry.result || {};
   const qualified = Array.isArray(result.qualified_references) ? result.qualified_references : [];
   const needsReview = Array.isArray(result.needs_review_references) ? result.needs_review_references : [];
-  const candidates = [...qualified, ...needsReview];
+  const rejected = Array.isArray(result.rejected_references) ? result.rejected_references : [];
+  const candidateGroups = [
+    { key: "qualified", title: t("candidate.qualified"), references: qualified },
+    { key: "needs_review", title: t("candidate.needsReview"), references: needsReview },
+    { key: "rejected", title: t("candidate.rejectedReferences"), references: rejected },
+  ].filter((group) => group.references.length);
+  const candidates = candidateGroups.flatMap((group) => group.references.map((candidate) => ({ ...candidate, candidate_group: group.key })));
 
   useEffect(() => {
     setCandidatesCollapsed(false);
@@ -324,25 +379,37 @@ function SearchHistoryDetail({ entry, mode, t }) {
               className={`history-collapse-button ${candidatesCollapsed ? "is-collapsed" : ""}`}
               type="button"
               aria-expanded={!candidatesCollapsed}
+              aria-label={candidatesCollapsed ? t("history.expandCandidates") : t("history.collapseCandidates")}
+              title={candidatesCollapsed ? t("history.expandCandidates") : t("history.collapseCandidates")}
               onClick={() => setCandidatesCollapsed((collapsed) => !collapsed)}
             >
               <span className="history-collapse-icon" aria-hidden="true" />
-              {candidatesCollapsed ? t("history.expandCandidates") : t("history.collapseCandidates")}
             </button>
           </div>
           {candidatesCollapsed ? (
-            <div className="history-candidate-collapsed">
-              {t("history.candidatesCollapsed", { count: candidates.length })}
-            </div>
+            null
           ) : (
-            <ol className="history-candidate-list">
-              {candidates.slice(0, 30).map((candidate, index) => (
-                <li key={`${candidate.doi || candidate.source || candidate.title || "candidate"}-${index}`}>
-                  <strong>{candidate.title || t("candidate.untitled")}</strong>
-                  <small>{candidate.doi || candidate.pmid || candidate.arxiv_id || candidate.source || t("reference.noStableId")}</small>
-                </li>
+            <div className="history-candidate-groups">
+              {candidateGroups.map((group) => (
+                <section className="history-candidate-group" key={group.key}>
+                  <h4>
+                    <span className={`candidate-badge screening-${group.key}`}>{group.title}</span>
+                    <small>{t("history.candidatesCount", { count: group.references.length })}</small>
+                  </h4>
+                  <ol className="history-candidate-list">
+                    {group.references.slice(0, 30).map((candidate, index) => (
+                      <HistoryCandidateItem
+                        candidate={candidate}
+                        index={index}
+                        groupKey={group.key}
+                        t={t}
+                        key={`${candidate.doi || candidate.source || candidate.title || "candidate"}-${group.key}-${index}`}
+                      />
+                    ))}
+                  </ol>
+                </section>
               ))}
-            </ol>
+            </div>
           )}
         </div>
       ) : (
@@ -350,6 +417,33 @@ function SearchHistoryDetail({ entry, mode, t }) {
       )}
     </>
   );
+}
+
+function HistoryCandidateItem({ candidate, index, groupKey, t }) {
+  const source = candidateLinkSource(candidate);
+  return (
+    <li className={`history-candidate-item history-candidate-item--${groupKey}`}>
+      <span className="history-candidate-index">{index + 1}.</span>
+      <div className="history-candidate-main">
+        <strong>
+          <ReferenceLink title={candidate.title || t("candidate.untitled")} source={source} t={t} />
+        </strong>
+        <small>{referenceIdentifierText(candidate)}</small>
+      </div>
+    </li>
+  );
+}
+
+function candidateLinkSource(candidate) {
+  const source = String(candidate?.source || candidate?.url || candidate?.abs_url || "").trim();
+  if (source) return source;
+  const doi = String(candidate?.doi || "").trim();
+  if (doi) return `https://doi.org/${doi.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "")}`;
+  const pmid = String(candidate?.pmid || "").trim();
+  if (pmid) return `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
+  const arxivId = String(candidate?.arxiv_id || "").trim();
+  if (arxivId) return `https://arxiv.org/abs/${arxivId}`;
+  return "";
 }
 
 function MetaItem({ label, value }) {
@@ -363,6 +457,11 @@ function MetaItem({ label, value }) {
 
 function displayHistoryTitle(entry, t) {
   const rawTitle = String(entry?.title || "").trim();
+  if (entry?.kind === "novelty_check") {
+    const request = entry.request || {};
+    const subject = cleanHistorySubject(request.innovation_text || rawTitle) || t("novelty.title");
+    return `${t("history.kind.novelty")} · ${subject}`;
+  }
   if (!entry || !["direct_analysis", "search_analysis"].includes(entry.kind)) {
     return rawTitle || t("history.untitled");
   }
@@ -454,6 +553,7 @@ function kindLabel(kind, t) {
     search_analysis: "history.kind.searchAnalysis",
     literature_search: "history.kind.search",
     search_flow: "history.kind.searchFlow",
+    novelty_check: "history.kind.novelty",
   }[kind] || "history.kind.unknown";
   return t(key);
 }
@@ -482,6 +582,10 @@ function isAnalysisEntryReady(entry) {
   if (["direct_analysis", "search_analysis"].includes(entry.kind)) {
     return hasAnalysisResultContent(entry.result || {}, entry.request?.review_needed_documents || []);
   }
+  if (entry.kind === "novelty_check") {
+    const result = entry.result || {};
+    return Boolean(result.overall || (Array.isArray(result.comparisons) && result.comparisons.length));
+  }
   const analysis = entry.analysis && typeof entry.analysis === "object" ? entry.analysis : null;
   if (!analysis) return false;
   const analysisResult = analysis.result || {};
@@ -505,6 +609,9 @@ function translateStage(stage, t) {
     "Analysis complete": t("history.stageComplete"),
     "Searching literature...": t("history.searchLoadingTitle"),
     "Search complete": t("history.searchComplete"),
+    "Planning novelty search...": t("job.planningNovelty"),
+    "Assessing novelty overlap...": t("job.assessingNovelty"),
+    "Novelty check complete": t("job.noveltyComplete"),
     "Task interrupted": t("history.taskInterrupted"),
   };
   return stageMap[stage] || stage;

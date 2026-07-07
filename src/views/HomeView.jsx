@@ -1,4 +1,4 @@
-import literatureSearchingIllustration from "../assets/literature-searching-illustration.png";
+import literatureSearchingIllustration from "../assets/literature-searching-illustration-home.webp";
 import breezeLeavesIcon from "../../web_icon_pack/svg/medical_decor_icon_pack_svg/breeze-leaves.svg";
 import confettiBurstIcon from "../../web_icon_pack/svg/medical_decor_icon_pack_svg/confetti-burst.svg";
 import fireworkBurstIcon from "../../web_icon_pack/svg/medical_decor_icon_pack_svg/firework-burst.svg";
@@ -31,6 +31,15 @@ const homeDecorations = [
   { src: confettiBurstIcon, className: "home-decor-icon--hero-left" },
   { src: radiantSparkleIcon, className: "home-decor-icon--hero-right" },
   { src: sparkleClusterIcon, className: "home-decor-icon--choice-right" },
+];
+
+const literatureDomains = [
+  "medical",
+  "biological",
+  "computer",
+  "AI",
+  "engineering",
+  "social science",
 ];
 
 function HomeActionButton({ label, tone, onClick }) {
@@ -67,20 +76,23 @@ export default function HomeView({ onNavigate, t }) {
             <span className="home-hero-line">
               Make{" "}
               <span className="home-domain-rotator" aria-hidden="true">
-                <span className="home-domain home-domain--medical">medical</span>
-                <span className="home-domain home-domain--biological">biological</span>
+                {literatureDomains.map((domain, index) => (
+                  <span className="home-domain" style={{ "--domain-index": index }} key={domain}>
+                    {domain}
+                  </span>
+                ))}
               </span>
               {" "}literature
-              <span className="sr-only">medical/biological</span>
+              <span className="sr-only">{literatureDomains.join(", ")}</span>
             </span>
             <span className="home-hero-line home-hero-line--action">
-              research
+              search
               <span className="home-word-rotator" aria-hidden="true">
-                <span className="home-word home-word--easier">easier</span>
-                <span className="home-word home-word--faster">faster</span>
-                <span className="home-word home-word--better">better</span>
+                <span className="home-word home-word--easier">clearer</span>
+                <span className="home-word home-word--faster">easier</span>
+                <span className="home-word home-word--better">smarter</span>
               </span>
-              <span className="sr-only">easier, faster, better</span>
+              <span className="sr-only">clearer, easier, smarter</span>
             </span>
           </h1>
         </div>
@@ -165,7 +177,23 @@ export default function HomeView({ onNavigate, t }) {
             <HomeActionButton
               label={t("home.startSearch")}
               tone="cyan"
-              onClick={() => onNavigate("search")}
+              onClick={() => onNavigate("standaloneSearch")}
+            />
+          </article>
+
+          <article className="choice-card choice-card--novelty">
+            <div>
+              <div className="tag-row">
+                <span className="tag tag-blue">{t("home.noveltyTag")}</span>
+                <span className="tag">{t("home.noveltySubtag")}</span>
+              </div>
+              <h2>{t("home.noveltyTitle")}</h2>
+              <p>{t("home.noveltyBody")}</p>
+            </div>
+            <HomeActionButton
+              label={t("home.startNovelty")}
+              tone="green"
+              onClick={() => onNavigate("novelty")}
             />
           </article>
         </div>

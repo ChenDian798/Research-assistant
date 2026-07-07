@@ -1,15 +1,23 @@
 .env
+.env.local
+.env.*.local
+!.env.example
 __pycache__/
 *.py[cod]
 *.log
 *.zip
+*.tmp
 node_modules/
 logs/
+web/dist/
 
 .backups/
 .deploy_tmp/
+tmp/
 outputs/
 history_records.json
+history_records*.json
+history_records*.json.*
 
 .pytest_cache/
 .coverage
