@@ -1,4 +1,4 @@
-# Research Agent
+# Research Assistant
 
 当前项目只保留一个核心 Web 功能：**文献分析**。
 
