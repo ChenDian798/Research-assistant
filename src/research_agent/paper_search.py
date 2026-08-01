@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import re
@@ -2789,6 +2790,7 @@ def search_papers(
     timeout_seconds: int = 45,
     search_mode: str = "auto",
 ) -> dict:
+    started_at = time.monotonic()
     clean_query = str(query or "").strip()
     if not clean_query:
         raise ValueError("Search query cannot be empty.")
@@ -2812,6 +2814,8 @@ def search_papers(
         max_internal_results=max_internal_results,
         search_mode=search_mode,
     )
+    planning_seconds = time.monotonic() - started_at
+    recall_started_at = time.monotonic()
     papers, source_results, errors, exact_title_source_results, channel_results = execute_recall_channels(
         recall_channels,
         source_names,
@@ -2820,7 +2824,14 @@ def search_papers(
         year=str(year or "").strip(),
         timeout_seconds=max(1, int(timeout_seconds or 45)),
     )
+    recall_seconds = time.monotonic() - recall_started_at
+    # Collapse duplicates before any canonical repair or downstream verification.
+    # The merge retains all retrieval origins for auditability instead of silently
+    # dropping information from a second provider.
+    papers = dedupe_papers(papers)
+    repair_started_at = time.monotonic()
     papers = repair_canonical_metadata_candidates(papers, clean_query, search_plan, source_names, max_results_per_source=max_internal_results)
+    repair_seconds = time.monotonic() - repair_started_at
     papers = filter_papers_by_year(papers, str(year or "").strip())
     internal_source_results = dict(source_results)
     deduped = rank_papers(dedupe_papers(papers), clean_query, search_plan)
@@ -2847,6 +2858,12 @@ def search_papers(
         "internal_source_results": internal_source_results,
         "exact_title_source_results": exact_title_source_results,
         "channel_results": channel_results,
+        "timings": {
+            "planning_seconds": round(planning_seconds, 3),
+            "recall_seconds": round(recall_seconds, 3),
+            "canonical_repair_seconds": round(repair_seconds, 3),
+            "search_total_seconds": round(time.monotonic() - started_at, 3),
+        },
         "errors": errors,
         "raw_count": len(papers),
         "papers": deduped,
@@ -3309,42 +3326,59 @@ def run_paper_search_backend_by_source(
         clean_query = str(query or "").strip()
         if not clean_query:
             continue
-        handled = run_source_specific_query(
-            source,
-            clean_query,
-            max_results_per_source=max_results_per_source,
-            timeout_seconds=timeout_seconds,
-        )
-        if handled is not None:
-            papers, error = handled
-            merged_results.setdefault(source, papers)
-            if error:
-                merged_errors[source] = error
-            continue
-        grouped.setdefault(clean_query, []).append(source)
+        if parse_fielded_author_query(clean_query) or is_author_field_query(clean_query):
+            grouped.setdefault(f"__author__:{source}:{clean_query}", []).append(source)
+        else:
+            grouped.setdefault(clean_query, []).append(source)
 
-    for query, sources in grouped.items():
-        payload = run_paper_search_backend(
-            query,
-            sources=sources,
+    def run_group(group_query: str, group_sources: list[str]) -> tuple[list[str], dict]:
+        if group_query.startswith("__author__:"):
+            source = group_sources[0]
+            source_query = group_query.split(":", 2)[-1]
+            handled = run_source_specific_query(
+                source,
+                source_query,
+                max_results_per_source=max_results_per_source,
+                timeout_seconds=timeout_seconds,
+            )
+            papers, error = handled if handled is not None else ([], "")
+            return group_sources, {"results": {source: papers}, "errors": {source: error} if error else {}}
+        return group_sources, run_paper_search_backend(
+            group_query,
+            sources=group_sources,
             max_results_per_source=max_results_per_source,
             year=year,
             timeout_seconds=timeout_seconds,
         )
-        papers, source_results, errors = normalize_search_payload(payload, sources)
-        for source in sources:
-            merged_results.setdefault(source, [])
-        for paper in papers:
-            source = normalize_source_name(paper.get("retrieved_from") or paper.get("source_label") or paper.get("source"))
-            if source not in sources:
-                source = normalize_source_name(paper.get("raw_source_record", {}).get("source")) if isinstance(paper.get("raw_source_record"), dict) else ""
-            if source not in sources:
-                source = sources[0]
-            merged_results.setdefault(source, []).append(paper.get("raw_source_record") or paper)
-        for source in sources:
-            if source_results.get(source, 0) == 0:
-                merged_results.setdefault(source, merged_results.get(source, []))
-        merged_errors.update(errors)
+
+    with ThreadPoolExecutor(max_workers=source_concurrency(len(queries_by_source)), thread_name_prefix="paper-query") as executor:
+        futures = {
+            executor.submit(run_group, query, sources): (query, sources)
+            for query, sources in grouped.items()
+        }
+        for future in as_completed(futures):
+            _, requested_sources = futures[future]
+            try:
+                sources, payload = future.result()
+            except Exception as error:
+                for source in requested_sources:
+                    merged_results.setdefault(source, [])
+                    merged_errors[source] = str(error)
+                continue
+            papers, source_results, errors = normalize_search_payload(payload, sources)
+            for source in sources:
+                merged_results.setdefault(source, [])
+            for paper in papers:
+                source = normalize_source_name(paper.get("retrieved_from") or paper.get("source_label") or paper.get("source"))
+                if source not in sources:
+                    source = normalize_source_name(paper.get("raw_source_record", {}).get("source")) if isinstance(paper.get("raw_source_record"), dict) else ""
+                if source not in sources:
+                    source = sources[0]
+                merged_results.setdefault(source, []).append(paper.get("raw_source_record") or paper)
+            for source in sources:
+                if source_results.get(source, 0) == 0:
+                    merged_results.setdefault(source, merged_results.get(source, []))
+            merged_errors.update(errors)
     return {"results": merged_results, "errors": merged_errors}
 
 
@@ -3476,39 +3510,55 @@ def run_paper_search_mcp_python(
         "openalex": search_openalex_api,
         "cnki": search_cnki_api,
     }
-    results: dict[str, list[dict]] = {}
-    errors: dict[str, str] = {}
-    for source in sources:
+    def search_one_source(source: str) -> tuple[str, list[dict], str]:
         if source == "arxiv":
             try:
-                results[source] = search_arxiv_api(
+                papers = search_arxiv_api(
                     query,
                     max_results_per_source,
                     timeout_seconds=max(1, int(timeout_seconds or 45)),
                 )
             except Exception as error:
-                results[source] = []
-                errors[source] = str(error)
-            continue
+                return source, [], str(error)
+            return source, papers, ""
         if source in api_searchers:
             try:
-                results[source] = api_searchers[source](query, max_results_per_source)
+                papers = api_searchers[source](query, max_results_per_source)
             except Exception as error:
-                results[source] = []
-                errors[source] = str(error)
-            continue
+                return source, [], str(error)
+            return source, papers, ""
         searcher_class = searchers.get(source)
         if searcher_class is None:
-            results[source] = []
-            errors[source] = "This source is not supported by the installed paper-search-mcp Python package."
-            continue
+            return source, [], "This source is not supported by the installed paper-search-mcp Python package."
         try:
             papers = searcher_class().search(query, max_results_per_source)
-            results[source] = [paper.to_dict() for paper in papers]
+            return source, [paper.to_dict() for paper in papers], ""
         except Exception as error:
-            results[source] = []
-            errors[source] = str(error)
+            return source, [], str(error)
+
+    results: dict[str, list[dict]] = {}
+    errors: dict[str, str] = {}
+    workers = source_concurrency(len(sources))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="paper-source") as executor:
+        futures = {executor.submit(search_one_source, source): source for source in sources}
+        for future in as_completed(futures):
+            source = futures[future]
+            try:
+                source, papers, error = future.result()
+            except Exception as error:
+                papers, error = [], str(error)
+            results[source] = papers
+            if error:
+                errors[source] = error
     return {"results": results, "errors": errors}
+
+
+def source_concurrency(source_count: int) -> int:
+    try:
+        configured = int(os.getenv("PAPER_SEARCH_SOURCE_CONCURRENCY", "4"))
+    except ValueError:
+        configured = 4
+    return max(1, min(configured, max(1, source_count), 12))
 
 
 def search_semantic_scholar_api(query: str, max_results: int) -> list[dict]:
@@ -4007,16 +4057,43 @@ def parse_year_filter(value: str) -> tuple[int, int] | None:
 
 
 def dedupe_papers(papers: list[dict]) -> list[dict]:
-    seen = set()
+    seen: dict[str, int] = {}
     deduped = []
     for paper in papers:
         key = paper_identity_key(paper)
         if key and key in seen:
+            deduped[seen[key]] = merge_duplicate_papers(deduped[seen[key]], paper)
             continue
         if key:
-            seen.add(key)
-        deduped.append(paper)
+            seen[key] = len(deduped)
+        deduped.append(dict(paper))
     return deduped
+
+
+def merge_duplicate_papers(primary: dict, duplicate: dict) -> dict:
+    merged = dict(primary)
+    source_values = []
+    for item in (primary, duplicate):
+        existing_sources = item.get("retrieved_from_sources")
+        if isinstance(existing_sources, list):
+            source_values.extend(existing_sources)
+        source_values.extend(
+            value
+            for value in (item.get("retrieved_from"), item.get("source_label"), item.get("source"))
+            if value and str(value).strip()
+        )
+    merged["retrieved_from_sources"] = list(dict.fromkeys(str(value).strip() for value in source_values if str(value).strip()))
+
+    # Prefer the record with more usable bibliographic evidence while retaining
+    # the first stable identity and source URL for deterministic output.
+    for field in ("title", "authors", "abstract", "year", "journal", "venue", "url", "source"):
+        current = merged.get(field)
+        candidate = duplicate.get(field)
+        if not current and candidate:
+            merged[field] = candidate
+        elif field == "abstract" and len(str(candidate or "")) > len(str(current or "")):
+            merged[field] = candidate
+    return merged
 
 
 def paper_identity_key(paper: dict) -> str:

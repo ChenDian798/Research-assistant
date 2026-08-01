@@ -52,7 +52,24 @@ class LLMClient:
                 }
             }
 
-        max_attempts = 5
+        # Query planning is an optional accelerator, not a reason to hold a search
+        # request for minutes. Keep retries conservative; callers can fall back to
+        # deterministic rules when a provider is unavailable.
+        try:
+            max_attempts = int(os.getenv("LLM_MAX_ATTEMPTS", "2"))
+        except ValueError:
+            max_attempts = 2
+        max_attempts = max(1, min(max_attempts, 5))
+        try:
+            retry_max_delay = float(os.getenv("LLM_RETRY_MAX_DELAY_SECONDS", "3"))
+        except ValueError:
+            retry_max_delay = 3.0
+        retry_max_delay = max(0.0, min(retry_max_delay, 30.0))
+        try:
+            request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "30"))
+        except ValueError:
+            request_timeout = 30.0
+        request_timeout = max(3.0, min(request_timeout, 90.0))
         for attempt in range(max_attempts):
             try:
                 response = await self.client.chat.completions.create(
@@ -63,13 +80,13 @@ class LLMClient:
                     ],
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    timeout=90,
+                    timeout=request_timeout,
                     extra_body=extra_body,
                 )
                 break
             except (APIConnectionError, APITimeoutError, RateLimitError) as error:
                 last_error = error
-                await asyncio.sleep(min(12, 2**attempt))
+                await asyncio.sleep(min(retry_max_delay, 2**attempt))
             except APIStatusError as error:
                 last_error = error
                 if error.status_code < 500:
@@ -77,7 +94,7 @@ class LLMClient:
                         f"Upstream model request failed: HTTP {error.status_code}. {error.message}",
                         error.status_code,
                     ) from error
-                await asyncio.sleep(min(12, 2**attempt))
+                await asyncio.sleep(min(retry_max_delay, 2**attempt))
         else:
             if isinstance(last_error, APIStatusError):
                 raise LLMServiceError(

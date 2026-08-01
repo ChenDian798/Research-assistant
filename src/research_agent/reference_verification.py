@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+
 from .doi import (
     extract_arxiv_id,
     extract_doi,
@@ -12,7 +15,38 @@ from .doi import (
 
 
 def verify_references(references: list[dict]) -> list[dict]:
-    return [verify_reference(reference) for reference in references if isinstance(reference, dict)]
+    items = [reference for reference in references if isinstance(reference, dict)]
+    if len(items) < 2:
+        return [verify_reference(reference) for reference in items]
+
+    workers = _verification_workers(len(items))
+    verified: list[dict | None] = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reference-verify") as executor:
+        futures = {executor.submit(verify_reference, reference): index for index, reference in enumerate(items)}
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                verified[index] = future.result()
+            except Exception as error:
+                # A single provider failure must not discard an otherwise useful
+                # search result or prevent other candidates from being returned.
+                item = dict(items[index])
+                risks = list(item.get("verification_risks") or [])
+                risks.append(f"verification_error:{type(error).__name__}")
+                item["verification_status"] = "unverified"
+                item["verification_sources"] = ["paper-search-mcp"]
+                item["verification_risks"] = list(dict.fromkeys(risks))
+                item["provenance"] = build_provenance(item, verified_by="", evidence_level=evidence_level(item))
+                verified[index] = item
+    return [item for item in verified if item is not None]
+
+
+def _verification_workers(item_count: int) -> int:
+    try:
+        configured = int(os.getenv("PAPER_VERIFY_CONCURRENCY", "5"))
+    except ValueError:
+        configured = 5
+    return max(1, min(configured, item_count, 12))
 
 
 def verify_reference(reference: dict) -> dict:
@@ -27,9 +61,15 @@ def verify_reference(reference: dict) -> dict:
     verified_by = ""
     doi_resolution = ""
     if doi:
-        metadata = fetch_crossref_metadata(doi)
+        # Crossref metadata and a DOI resolution probe target different hosts and
+        # are independent. Run them together while the outer verification pool
+        # bounds total pressure on each provider.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="doi-verify") as executor:
+            metadata_future = executor.submit(fetch_crossref_metadata, doi)
+            resolution_future = executor.submit(doi_resolution_status, doi)
+            metadata = metadata_future.result()
+            doi_resolution = resolution_future.result()
         verified_by = "Crossref"
-        doi_resolution = doi_resolution_status(doi)
     elif pmid:
         metadata = fetch_pubmed_metadata(pmid)
         verified_by = "PubMed"

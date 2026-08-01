@@ -4,6 +4,7 @@ import json
 import os
 import re
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
 from http.client import IncompleteRead
@@ -165,6 +166,7 @@ def extract_url(reference: dict) -> str:
     return match.group(0).strip().rstrip(".)]}")
 
 
+@lru_cache(maxsize=2048)
 def fetch_crossref_metadata(doi: str) -> dict:
     url = f"https://api.crossref.org/works/{quote(doi, safe='')}"
     request = Request(
@@ -258,6 +260,7 @@ def fetch_openalex_metadata_by_doi(doi: str) -> dict:
     return metadata
 
 
+@lru_cache(maxsize=2048)
 def doi_resolution_status(doi: str) -> str:
     normalized = normalize_doi_text(doi)
     if not normalized:

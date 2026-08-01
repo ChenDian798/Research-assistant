@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
 import unicodedata
 import uuid
@@ -192,6 +193,7 @@ class SearchRouteService:
         self.handler._update_history_entry(history_id, status="error", error=message)
 
     def _run_literature_search_pipeline(self, request: dict) -> tuple[dict, dict]:
+        pipeline_started_at = time.monotonic()
         handler = self.handler
         query = str(request.get("query") or "").strip()
         sources = str(request.get("sources") or "").strip()
@@ -215,11 +217,16 @@ class SearchRouteService:
             timeout_seconds=timeout_seconds,
             search_mode=search_mode,
         )
+        search_finished_at = time.monotonic()
         max_total = handler._bounded_int(os.getenv("PAPER_SEARCH_MAX_TOTAL"), default=40, minimum=1, maximum=200)
         screened = screen_references_func(result.get("papers", [])[:max_total])
         screened = apply_relevance_gate_func(query, screened, query_plan=result.get("query_plan"))
-        verified_qualified = verify_references_func(screened["qualified"])
-        verified_needs_review = verify_references_func(screened["needs_review"])
+        screening_finished_at = time.monotonic()
+        qualified_count = len(screened["qualified"])
+        verified = verify_references_func([*screened["qualified"], *screened["needs_review"]])
+        verified_qualified = verified[:qualified_count]
+        verified_needs_review = verified[qualified_count:]
+        verification_finished_at = time.monotonic()
         qualified_references, needs_review_references = self._split_verified_search_candidates(
             verified_qualified,
             verified_needs_review,
@@ -259,6 +266,16 @@ class SearchRouteService:
             annotation_record=annotation_record,
             append_annotation_record=append_annotation_record,
         )
+        timings = dict(result.get("timings") or {})
+        timings.update(
+            {
+                "screening_seconds": round(screening_finished_at - search_finished_at, 3),
+                "verification_seconds": round(verification_finished_at - screening_finished_at, 3),
+                "pipeline_total_seconds": round(time.monotonic() - pipeline_started_at, 3),
+            }
+        )
+        response_payload["timings"] = timings
+        print(f"[search] timings {timings}", flush=True)
         return response_payload, {
             "counts": self._build_search_counts(
                 qualified_references,
@@ -310,6 +327,7 @@ class SearchRouteService:
             "source_results": result.get("source_results", {}),
             "internal_source_results": result.get("internal_source_results", {}),
             "channel_results": result.get("channel_results", {}),
+            "timings": result.get("timings", {}),
             "errors": result.get("errors", {}),
             "raw_count": result.get("raw_count", 0),
             "search_audit_log": str(audit_log) if audit_log else "",
