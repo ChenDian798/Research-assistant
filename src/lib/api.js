@@ -1,9 +1,46 @@
 ﻿import { assertUploadSize, buildLiteratureUserContext } from "./formatters.js";
 
 const appBasePath = (window.location.pathname.match(/^\/v\d+(?=\/|$)/) || [""])[0];
+let csrfToken = null;
 
 export function apiPath(path) {
   return `${appBasePath}${path}`;
+}
+
+export async function apiFetch(path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const requestOptions = { ...options, credentials: "same-origin" };
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    if (!csrfToken) {
+      const csrfResponse = await fetch(apiPath("/api/auth/csrf"), { credentials: "same-origin", cache: "no-store" });
+      const csrfPayload = await readJsonResponse(csrfResponse);
+      if (!csrfResponse.ok || !csrfPayload.csrf_token) {
+        const error = new Error(csrfPayload.error || "请先登录后再继续。");
+        error.status = csrfResponse.status;
+        throw error;
+      }
+      csrfToken = csrfPayload.csrf_token;
+    }
+    requestOptions.headers = { ...(options.headers || {}), "X-CSRF-Token": csrfToken };
+  }
+  const response = await fetch(apiPath(path), requestOptions);
+  if (response.status === 401) csrfToken = null;
+  return response;
+}
+
+export async function fetchCurrentUser() {
+  const response = await apiFetch("/api/auth/me", { cache: "no-store" });
+  if (response.status === 401) return null;
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload.user || null;
+}
+
+export async function logout() {
+  const response = await apiFetch("/api/auth/logout", { method: "POST" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  csrfToken = null;
 }
 
 export async function readJsonResponse(response) {
@@ -21,7 +58,7 @@ export async function readJsonResponse(response) {
 }
 
 export async function submitLiteratureSearchRequest(payload) {
-  const response = await fetch(apiPath("/api/literature-search"), {
+  const response = await apiFetch("/api/literature-search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -36,7 +73,7 @@ export async function submitLiteratureSearchRequest(payload) {
 }
 
 export async function submitNoveltyCheckRequest(payload) {
-  const response = await fetch(apiPath("/api/novelty-check"), {
+  const response = await apiFetch("/api/novelty-check", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -51,21 +88,21 @@ export async function submitNoveltyCheckRequest(payload) {
 }
 
 export async function fetchHistoryEntries() {
-  const response = await fetch(apiPath("/api/history"), { cache: "no-store" });
+  const response = await apiFetch("/api/history", { cache: "no-store" });
   const data = await readJsonResponse(response);
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return Array.isArray(data.history) ? data.history : [];
 }
 
 export async function fetchHistoryEntry(historyId) {
-  const response = await fetch(apiPath(`/api/history/${encodeURIComponent(historyId)}`), { cache: "no-store" });
+  const response = await apiFetch(`/api/history/${encodeURIComponent(historyId)}`, { cache: "no-store" });
   const data = await readJsonResponse(response);
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
 export async function deleteHistoryEntry(historyId) {
-  const response = await fetch(apiPath(`/api/history/${encodeURIComponent(historyId)}`), { method: "DELETE" });
+  const response = await apiFetch(`/api/history/${encodeURIComponent(historyId)}`, { method: "DELETE" });
   const data = await readJsonResponse(response);
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
@@ -76,7 +113,7 @@ function normalizeOutputLanguage(language) {
 }
 
 export async function submitLiteratureAnalysis({ topic = "literature-analysis", references = [], finalReport = "", historySource = "direct", historyId = "", outputLanguage = "zh" } = {}) {
-  return fetch(apiPath("/api/literature-analysis"), {
+  return apiFetch("/api/literature-analysis", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -113,14 +150,14 @@ export async function submitCombinedLiteratureAnalysis(references, pdfFiles, use
   formData.append("history_source", historySource);
   formData.append("output_language", normalizeOutputLanguage(outputLanguage));
   pdfFiles.forEach((file) => formData.append("pdf", file));
-  return fetch(apiPath("/api/literature-analysis/pdf"), { method: "POST", body: formData });
+  return apiFetch("/api/literature-analysis/pdf", { method: "POST", body: formData });
 }
 
 export async function waitForJob(basePath, jobId, updateStatus, t) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 10 * 60 * 1000) {
     await sleep(1000);
-    const response = await fetch(apiPath(`${basePath}/${jobId}`), { cache: "no-store" });
+    const response = await apiFetch(`${basePath}/${jobId}`, { cache: "no-store" });
     const payload = await readJsonResponse(response);
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     if (payload.status === "done") return payload;

@@ -48,7 +48,33 @@ let selectedSearchReferenceIds = new Set();
 let stagedAnalysisReferences = [];
 const appBasePath = (window.location.pathname.match(/^\/v\d+(?=\/|$)/) || [""])[0];
 const maxUploadBytes = 30 * 1024 * 1024;
+const maxUploadFileBytes = 15 * 1024 * 1024;
 const maxLiteraturePdfFiles = 4;
+let csrfToken = null;
+
+async function apiFetch(path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const requestOptions = { ...options, credentials: "same-origin" };
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    if (!csrfToken) {
+      const csrfResponse = await fetch(apiPath("/api/auth/csrf"), { credentials: "same-origin", cache: "no-store" });
+      if (csrfResponse.status === 401) {
+        window.location.assign(apiPath("/auth/login"));
+        throw new Error("请先登录。");
+      }
+      const csrfPayload = await readJsonResponse(csrfResponse);
+      if (!csrfResponse.ok || !csrfPayload.csrf_token) throw new Error(csrfPayload.error || "无法建立安全会话。");
+      csrfToken = csrfPayload.csrf_token;
+    }
+    requestOptions.headers = { ...(options.headers || {}), "X-CSRF-Token": csrfToken };
+  }
+  const response = await fetch(apiPath(path), requestOptions);
+  if (response.status === 401) {
+    csrfToken = null;
+    window.location.assign(apiPath("/auth/login"));
+  }
+  return response;
+}
 
 initPageNavigation();
 initSplitResizers();
@@ -669,6 +695,10 @@ function updatePdfFileSummary() {
   if (totalSize > maxUploadBytes) {
     pdfFileSummary.textContent += `，已超过 ${formatFileSize(maxUploadBytes)} 上传上限`;
   }
+  const oversized = selectedPdfFiles.filter((file) => file.size > maxUploadFileBytes);
+  if (oversized.length) {
+    pdfFileSummary.textContent += `，单文件需小于 ${formatFileSize(maxUploadFileBytes)}`;
+  }
   clearPdfButton.disabled = false;
 }
 
@@ -730,7 +760,7 @@ async function submitLiteratureSearch() {
   showSearchStep(2);
   searchCandidateList.innerHTML = loadingMarkup("正在检索", "正在调用可选 paper-search 集成，并进行本地筛选与校验。");
   try {
-    const response = await fetch(apiPath("/api/literature-search"), {
+    const response = await apiFetch("/api/literature-search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -941,7 +971,7 @@ function referenceIdentifierText(reference) {
 }
 
 async function submitLiteratureAnalysis({ topic = "literature-analysis", references = [], finalReport = "" } = {}) {
-  return fetch(apiPath("/api/literature-analysis"), {
+  return apiFetch("/api/literature-analysis", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -970,7 +1000,7 @@ async function submitCombinedLiteratureAnalysis(references, pdfFiles, userContex
   formData.append("references", JSON.stringify(references));
   formData.append("user_context", userContext);
   pdfFiles.forEach((file) => formData.append("pdf", file));
-  return fetch(apiPath("/api/literature-analysis/pdf"), { method: "POST", body: formData });
+  return apiFetch("/api/literature-analysis/pdf", { method: "POST", body: formData });
 }
 
 function buildLiteratureTopic(entries, pdfFiles, userContext = "", source = "direct") {
@@ -1088,7 +1118,7 @@ function downloadText(filename, text) {
 async function downloadPdfDocument({ title, markdown, filename, onStatus }) {
   onStatus("正在生成 PDF...");
   try {
-    const response = await fetch(apiPath("/api/export/pdf"), {
+    const response = await apiFetch("/api/export/pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title, markdown }),
@@ -1299,6 +1329,10 @@ function formatSelectedFilesSummary(files) {
 
 function assertUploadSize(files) {
   const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  const oversized = files.filter((file) => file.size > maxUploadFileBytes);
+  if (oversized.length) {
+    throw new Error(`单个文件不能超过 ${formatFileSize(maxUploadFileBytes)}：${oversized.map((file) => file.name).join("、")}`);
+  }
   if (totalSize > maxUploadBytes) {
     throw new Error(`上传文件总大小约 ${formatFileSize(totalSize)}，超过 ${formatFileSize(maxUploadBytes)} 上限。请减少文件数量，少量多次上传。`);
   }

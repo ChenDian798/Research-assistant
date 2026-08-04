@@ -1,4 +1,5 @@
 export const maxUploadBytes = 30 * 1024 * 1024;
+export const maxUploadFileBytes = 15 * 1024 * 1024;
 export const maxLiteraturePdfFiles = 4;
 
 export function createEmptyAnalysisResult(topic = "literature-analysis") {
@@ -234,6 +235,10 @@ export function formatSelectedFilesSummary(files) {
 
 export function assertUploadSize(files) {
   const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  const oversized = files.filter((file) => file.size > maxUploadFileBytes);
+  if (oversized.length) {
+    throw new Error(`Each file must be under ${formatFileSize(maxUploadFileBytes)}: ${oversized.map((file) => file.name).join("、")}`);
+  }
   if (totalSize > maxUploadBytes) {
     throw new Error(`上传文件总大小约 ${formatFileSize(totalSize)}，超过 ${formatFileSize(maxUploadBytes)} 上限。请减少文件数量，少量多次上传。`);
   }

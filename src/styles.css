@@ -191,6 +191,30 @@ a:focus-visible {
   background: #ffffff;
 }
 
+.topbar-right {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-button {
+  min-height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 740;
+}
+
+.account-button--login {
+  border-color: #171717;
+  background: #171717;
+  color: #ffffff;
+}
+
 .language-toggle-button {
   min-height: 28px;
   padding: 0 10px;

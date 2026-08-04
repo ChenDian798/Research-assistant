@@ -1,4 +1,4 @@
-import { apiPath, readJsonResponse } from "./api.js";
+import { apiFetch, readJsonResponse } from "./api.js";
 import { publicCellText, safeFileName, toStringList } from "./formatters.js";
 
 export function exportAnalysisDocument({ format, rows, summary, topic, onStatus, t }) {
@@ -30,7 +30,7 @@ function downloadText(filename, text) {
 async function downloadPdfDocument({ title, markdown, filename, onStatus, t }) {
   onStatus(translate("export.generatingPdf", t), false);
   try {
-    const response = await fetch(apiPath("/api/export/pdf"), {
+    const response = await apiFetch("/api/export/pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title, markdown }),

@@ -10,6 +10,8 @@ __pycache__/
 node_modules/
 logs/
 web/dist/
+data/
+user_data/
 
 .backups/
 .deploy_tmp/

@@ -10,7 +10,7 @@ const navItems = [
   ["history", "nav.history"],
 ];
 
-export default function Topbar({ currentView, language, onLanguageChange, onNavigate, t }) {
+export default function Topbar({ currentView, language, onLanguageChange, onNavigate, user, authLoading, onLogin, onLogout, t }) {
   return (
     <header className="app-topbar" aria-label={t("nav.aria")}>
       <div className="brand">
@@ -33,18 +33,29 @@ export default function Topbar({ currentView, language, onLanguageChange, onNavi
           </button>
         ))}
       </div>
-      <div className="topbar-language" aria-label={t("nav.language")}>
-        {languageOptions.map((option) => (
-          <button
-            className={`language-toggle-button ${language === option.value ? "is-active" : ""}`}
-            type="button"
-            aria-pressed={language === option.value}
-            onClick={() => onLanguageChange(option.value)}
-            key={option.value}
-          >
-            {option.label}
+      <div className="topbar-right">
+        {authLoading ? null : user ? (
+          <button className="account-button" type="button" onClick={onLogout} title={user.email || user.display_name}>
+            {language === "en" ? "Sign out" : "退出登录"}
           </button>
-        ))}
+        ) : (
+          <button className="account-button account-button--login" type="button" onClick={onLogin}>
+            {language === "en" ? "Sign in" : "登录"}
+          </button>
+        )}
+        <div className="topbar-language" aria-label={t("nav.language")}>
+          {languageOptions.map((option) => (
+            <button
+              className={`language-toggle-button ${language === option.value ? "is-active" : ""}`}
+              type="button"
+              aria-pressed={language === option.value}
+              onClick={() => onLanguageChange(option.value)}
+              key={option.value}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
     </header>
   );

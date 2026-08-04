@@ -25,6 +25,8 @@ import {
 } from "./lib/formatters.js";
 import {
   deleteHistoryEntry,
+  apiPath,
+  fetchCurrentUser,
   fetchHistoryEntries,
   fetchHistoryEntry,
   readJsonResponse,
@@ -32,6 +34,7 @@ import {
   submitLinkLiteratureAnalysis,
   submitLiteratureSearchRequest,
   submitNoveltyCheckRequest,
+  logout,
   waitForJob,
 } from "./lib/api.js";
 import { exportAnalysisDocument } from "./lib/export.js";
@@ -102,6 +105,8 @@ export default function App() {
   const [selectedHistoryId, setSelectedHistoryId] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const selectedHistoryIdRef = useRef("");
   const selectedHistoryEntryRef = useRef(null);
   const historyListRunId = useRef(0);
@@ -111,6 +116,13 @@ export default function App() {
   useEffect(() => {
     document.documentElement.lang = language === "en" ? "en" : "zh-CN";
   }, [language]);
+
+  useEffect(() => {
+    fetchCurrentUser()
+      .then(setCurrentUser)
+      .catch(() => setCurrentUser(null))
+      .finally(() => setAuthLoading(false));
+  }, []);
 
   useEffect(() => {
     const onHashChange = () => setCurrentView(viewFromHash());
@@ -201,11 +213,11 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (currentView !== "history") return undefined;
+    if (currentView !== "history" || authLoading || !currentUser) return undefined;
     loadHistory("", { forceDetail: true });
     const timer = window.setInterval(() => loadHistory(), 5000);
     return () => window.clearInterval(timer);
-  }, [currentView]);
+  }, [currentView, authLoading, currentUser]);
 
   const handleSelectHistoryEntry = async (historyId) => {
     if (!historyId) return;
@@ -1177,6 +1189,14 @@ export default function App() {
         language={language}
         onLanguageChange={handleLanguageChange}
         onNavigate={handleTopbarNavigate}
+        user={currentUser}
+        authLoading={authLoading}
+        onLogin={() => window.location.assign(apiPath("/auth/login"))}
+        onLogout={async () => {
+          await logout();
+          setCurrentUser(null);
+          navigate("home");
+        }}
         t={t}
       />
       <main className={`shell shell--${currentView}`}>

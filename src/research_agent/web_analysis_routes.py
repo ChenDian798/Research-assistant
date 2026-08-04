@@ -72,7 +72,19 @@ class AnalysisRouteService:
             history_source = str(payload.get("history_source") or "direct").strip().lower()
             if history_source not in {"direct", "search"}:
                 history_source = "direct"
-            job_id = uuid.uuid4().hex
+            job_request = {
+                "topic": topic,
+                "references": references,
+                "final_report": final_report,
+                "citation_format": citation_format,
+                "include_audit": include_audit,
+                "output_language": output_language,
+            }
+            durable_job, created = handler._create_durable_job("literature_analysis", job_request)
+            job_id = str(durable_job["id"])
+            if not created:
+                handler._send_json({"job_id": job_id, "history_id": durable_job.get("history_id", ""), "status": durable_job.get("status", "queued"), "idempotent_replay": True}, HTTPStatus.ACCEPTED)
+                return
             port = handler._server_port()
             analysis_history_request = {
                 "topic": topic,
@@ -108,16 +120,10 @@ class AnalysisRouteService:
                     "port": port,
                     "history_id": history_id,
                     "history_slot": history_slot,
+                    "request": {**job_request, "history_id": history_id, "history_slot": history_slot},
                 },
             )
-
-            thread_module = self._dependency("threading", threading)
-            thread = thread_module.Thread(
-                target=handler._run_literature_analysis_job,
-                args=(job_id, topic, references, final_report, citation_format, include_audit, port, history_id, history_slot, output_language),
-                daemon=True,
-            )
-            thread.start()
+            handler._enqueue_durable_job(job_id)
             handler._send_json({"job_id": job_id, "history_id": history_id, "status": "queued"}, HTTPStatus.ACCEPTED)
         except BrokenPipeError:
             print("[web] client disconnected before literature response was sent", flush=True)
@@ -133,7 +139,7 @@ class AnalysisRouteService:
 
     def _handle_literature_pdf_analysis(self) -> None:
         handler = self.handler
-        max_pdf_upload_files = self._dependency("MAX_PDF_UPLOAD_FILES", 4)
+        max_pdf_upload_files = handler._upload_security_policy().max_file_count
         try:
             files, link_references, fields = handler._read_pdf_uploads_with_fields(allow_empty=True)
             if len(files) > max_pdf_upload_files:
@@ -194,7 +200,19 @@ class AnalysisRouteService:
             history_source = str(fields.get("history_source") or "direct").strip().lower()
             if history_source not in {"direct", "search"}:
                 history_source = "direct"
-            job_id = uuid.uuid4().hex
+            job_request = {
+                "topic": topic,
+                "references": references,
+                "final_report": final_report,
+                "citation_format": citation_format,
+                "include_audit": include_audit,
+                "output_language": output_language,
+            }
+            durable_job, created = handler._create_durable_job("literature_analysis", job_request)
+            job_id = str(durable_job["id"])
+            if not created:
+                handler._send_json({"job_id": job_id, "history_id": durable_job.get("history_id", ""), "status": durable_job.get("status", "queued"), "idempotent_replay": True}, HTTPStatus.ACCEPTED)
+                return
             port = handler._server_port()
             history_id = handler._create_history_entry(
                 kind="search_analysis" if history_source == "search" else "direct_analysis",
@@ -227,16 +245,10 @@ class AnalysisRouteService:
                     "kind": "literature_analysis",
                     "port": port,
                     "history_id": history_id,
+                    "request": {**job_request, "history_id": history_id, "history_slot": "result"},
                 },
             )
-
-            thread_module = self._dependency("threading", threading)
-            thread = thread_module.Thread(
-                target=handler._run_literature_analysis_job,
-                args=(job_id, topic, references, final_report, citation_format, include_audit, port, history_id, "result", output_language),
-                daemon=True,
-            )
-            thread.start()
+            handler._enqueue_durable_job(job_id)
             handler._send_json(
                 {
                     "job_id": job_id,

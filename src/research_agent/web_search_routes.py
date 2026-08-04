@@ -56,7 +56,11 @@ class SearchRouteService:
                 return
 
             if handler._truthy(payload.get("run_async")):
-                job_id = uuid.uuid4().hex
+                durable_job, created = handler._create_durable_job("literature_search", request)
+                job_id = str(durable_job["id"])
+                if not created:
+                    handler._send_json({"job_id": job_id, "history_id": durable_job.get("history_id", ""), "status": durable_job.get("status", "queued"), "search_enabled": True, "idempotent_replay": True}, HTTPStatus.ACCEPTED)
+                    return
                 history_id = handler._create_history_entry(
                     kind="search_flow",
                     source="search",
@@ -75,14 +79,10 @@ class SearchRouteService:
                         "kind": "literature_search",
                         "port": handler._server_port(),
                         "history_id": history_id,
+                        "request": request,
                     },
                 )
-                thread = threading.Thread(
-                    target=handler._run_literature_search_job,
-                    args=(job_id, history_id, request),
-                    daemon=True,
-                )
-                thread.start()
+                handler._enqueue_durable_job(job_id)
                 handler._send_json(
                     {
                         "job_id": job_id,
@@ -402,7 +402,11 @@ class SearchRouteService:
                 handler._send_json({"error": "Innovation description cannot be empty."}, HTTPStatus.BAD_REQUEST)
                 return
 
-            job_id = uuid.uuid4().hex
+            durable_job, created = handler._create_durable_job("novelty_check", request)
+            job_id = str(durable_job["id"])
+            if not created:
+                handler._send_json({"job_id": job_id, "history_id": durable_job.get("history_id", ""), "status": durable_job.get("status", "queued"), "search_enabled": True, "idempotent_replay": True}, HTTPStatus.ACCEPTED)
+                return
             history_id = handler._create_history_entry(
                 kind="novelty_check",
                 source="novelty",
@@ -421,14 +425,10 @@ class SearchRouteService:
                     "kind": "novelty_check",
                     "port": handler._server_port(),
                     "history_id": history_id,
+                    "request": request,
                 },
             )
-            thread = threading.Thread(
-                target=handler._run_novelty_check_job,
-                args=(job_id, history_id, request),
-                daemon=True,
-            )
-            thread.start()
+            handler._enqueue_durable_job(job_id)
             handler._send_json(
                 {
                     "job_id": job_id,

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import threading
+import time
 import traceback
 import uuid
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
@@ -37,7 +41,7 @@ from src.research_agent.web_history import (
 )
 from src.research_agent import web_document_identity
 from src.research_agent import web_pdf_extract
-from src.research_agent.web_jobs import load_persisted_job_log, persist_job_log
+from src.research_agent.web_jobs import load_persisted_job_log, persist_job_log, set_job_error, set_job_status
 from src.research_agent.web_pdf_export import markdown_to_pdf_bytes, normalize_pdf_symbols
 from src.research_agent.web_response import (
     content_type_for_path,
@@ -48,12 +52,15 @@ from src.research_agent.web_response import (
     send_json,
 )
 from src.research_agent.web_runtime import ProcessFileLock, enable_auto_file_logging
+from src.research_agent.web_security import CURRENT_USER_ID, OIDCClient, UserDataStore, configure_store
 from src.research_agent.web_search_routes import SearchRouteService
 from src.research_agent.web_uploads import (
+    UploadSecurityPolicy,
     extract_docx_text,
     multipart_fields,
     normalize_extracted_text,
     read_multipart_uploads,
+    truncate_extracted_text,
 )
 from src.research_agent.web_utils import (
     bounded_int,
@@ -66,6 +73,7 @@ from src.research_agent.web_utils import (
 
 
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env" if (ROOT / ".env").exists() else ROOT / ".env.example")
 WEB_DIR = ROOT / "web"
 WEB_DIST_DIR = WEB_DIR / "dist"
 OUTPUT_DIR = ROOT / "outputs"
@@ -74,8 +82,16 @@ ANNOTATION_RECORD_PATH = ROOT / "检索标注记录.md"
 HISTORY_PATH = ROOT / "history_records.json"
 MAX_PDF_UPLOAD_MB = 30
 MAX_PDF_UPLOAD_BYTES = MAX_PDF_UPLOAD_MB * 1024 * 1024
+MAX_PDF_UPLOAD_FILE_MB = 15
 MAX_PDF_UPLOAD_FILES = 4
 PDF_EXTRACT_PAGE_LIMIT = 120
+PDF_UPLOAD_MAX_PAGE_COUNT = 300
+MAX_UPLOAD_EXTRACTED_TEXT_CHARS = 300_000
+UPLOAD_PARSE_TIMEOUT_SECONDS = 30
+MAX_DOCX_UNZIPPED_MB = 20
+MAX_DOCX_XML_MB = 10
+MAX_DOCX_ZIP_ENTRIES = 200
+MAX_DOCX_COMPRESSION_RATIO = 100
 PDF_REFERENCE_EXCERPT_CHARS = 10000
 CONTEXT_DOCUMENT_EXCERPT_CHARS = 4000
 JOBS: dict[str, dict[str, object]] = {}
@@ -84,6 +100,107 @@ HISTORY_LOCK_PATH = ROOT / "history_records.lock"
 
 
 HISTORY_LOCK = ProcessFileLock(HISTORY_LOCK_PATH)
+DATA_STORE = UserDataStore(ROOT)
+configure_store(DATA_STORE)
+DATA_STORE.migrate_legacy_history(HISTORY_PATH)
+DATA_STORE.enforce_retention(int(os.getenv("DATA_RETENTION_DAYS", "90")))
+OIDC = OIDCClient()
+OIDC_STATES: dict[str, tuple[str, float]] = {}
+
+
+class BackgroundJobHandler:
+    """Small worker facade for the existing workflow services.
+
+    It deliberately exposes no request/response methods: a queued task gets every
+    input from `jobs.request_json`, and all outward state changes go back to the DB.
+    """
+
+    def _server_port(self) -> str:
+        return "worker"
+
+    _truthy = staticmethod(truthy)
+    _normalize_output_language = staticmethod(normalize_output_language)
+    _paper_search_enabled = staticmethod(lambda: truthy(os.getenv("PAPER_SEARCH_ENABLED", "false")))
+    _bounded_int = staticmethod(bounded_int)
+
+
+def execute_persisted_job(job_id: str, *, task_id: str = "", attempt: int = 0) -> None:
+    """Worker entry: claim a database job and run its durable request payload."""
+    job = DATA_STORE.claim_job(
+        job_id,
+        task_id=task_id,
+        attempt=attempt,
+        stale_after_seconds=int(os.getenv("JOB_STALE_AFTER_SECONDS", "300")),
+    )
+    if not job:
+        return
+    owner = str(job.get("owner_user_id") or "")
+    if not owner:
+        raise RuntimeError(f"Job {job_id} has no owner")
+    token = CURRENT_USER_ID.set(owner)
+    handler = object.__new__(ResearchWebHandler)
+    try:
+        # The handler methods used by workflows are all static/state-free helpers;
+        # providing a server-less instance avoids coupling task execution to HTTP.
+        handler._server_port = lambda: "worker"
+        set_job_status(JOBS, JOBS_LOCK, job_id, {**job, "status": "running", "stage": "Worker accepted job", "progress": 1, "task_id": task_id or job.get("task_id", ""), "attempt": attempt or job.get("attempt", 0)})
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        kind = str(job.get("kind") or "")
+        history_id = str(job.get("history_id") or request.get("history_id") or "")
+        if kind == "literature_search":
+            SearchRouteService(handler, JOBS, JOBS_LOCK)._run_literature_search_job(job_id, history_id, request)
+        elif kind == "novelty_check":
+            SearchRouteService(handler, JOBS, JOBS_LOCK)._run_novelty_check_job(job_id, history_id, request)
+        elif kind == "literature_analysis":
+            AnalysisRouteService(handler)._run_literature_analysis_job(
+                job_id,
+                str(request.get("topic") or "current research"),
+                list(request.get("references") or []),
+                str(request.get("final_report") or ""),
+                str(request.get("citation_format") or "APA"),
+                bool(request.get("include_audit")),
+                "worker",
+                history_id,
+                str(job.get("history_slot") or request.get("history_slot") or "result"),
+                str(request.get("output_language") or "zh"),
+            )
+        else:
+            raise RuntimeError(f"Unsupported durable job kind: {kind}")
+        final_job = DATA_STORE.job_by_id(job_id) or {}
+        if final_job.get("status") == "error":
+            raise RuntimeError(str(final_job.get("error") or "Worker reported a failed job"))
+    except Exception:
+        # The Celery wrapper decides whether this attempt is retried or terminal.
+        # Leaving the row running here makes the transition atomic in its handler.
+        raise
+    finally:
+        CURRENT_USER_ID.reset(token)
+
+
+def mark_job_for_retry(job_id: str, error: Exception, *, attempt: int) -> None:
+    job = DATA_STORE.job_by_id(job_id)
+    if not job:
+        return
+    owner = str(job.get("owner_user_id") or "")
+    if owner:
+        DATA_STORE.save_job(owner, job_id, {"status": "queued", "stage": "Retry scheduled", "progress": 0, "attempt": attempt, "error": f"{type(error).__name__}: {error}"})
+
+
+def mark_job_failed(job_id: str, error: Exception) -> None:
+    job = DATA_STORE.job_by_id(job_id)
+    if not job:
+        return
+    owner = str(job.get("owner_user_id") or "")
+    if not owner:
+        return
+    message = f"{type(error).__name__}: {error}"
+    DATA_STORE.save_job(owner, job_id, {"status": "error", "stage": "Worker failed", "error": message})
+    history_id = str(job.get("history_id") or (job.get("request") or {}).get("history_id") or "")
+    token = CURRENT_USER_ID.set(owner)
+    try:
+        ResearchWebHandler._update_history_entry(history_id, status="error", error=message)
+    finally:
+        CURRENT_USER_ID.reset(token)
 
 
 def _enable_auto_file_logging(port: int | str = "") -> tuple[Path, Path] | None:
@@ -95,6 +212,12 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path == "/auth/login":
+            self._begin_oidc_login()
+            return
+        if path == "/auth/callback":
+            self._complete_oidc_login()
+            return
         if path in {"/", "/index.html"}:
             self._send_file(frontend_index_path(WEB_DIR, WEB_DIST_DIR), "text/html; charset=utf-8")
             return
@@ -117,6 +240,27 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
+        if path == "/api/auth/me":
+            user = self._authenticated_user()
+            if not user:
+                self._send_json({"error": "Authentication required."}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._send_json({"user": {"id": user["id"], "email": user.get("email", ""), "display_name": user.get("display_name", "")}})
+            return
+        if path == "/api/auth/csrf":
+            user = self._require_authenticated_user()
+            if not user:
+                return
+            self._send_json({"csrf_token": user["csrf_token"]})
+            return
+
+        if path.startswith("/api/"):
+            user = self._require_authenticated_user()
+            if not user:
+                return
+            self._request_user_id = user["id"]
+            CURRENT_USER_ID.set(user["id"])
+
         if path == "/api/history":
             self._send_json({"history": self._history_entries(summary=True)})
             return
@@ -130,10 +274,18 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             self._send_json(entry)
             return
 
+        if path.startswith("/api/jobs/"):
+            job_id = path.rsplit("/", 1)[-1]
+            job = DATA_STORE.job(self._request_user_id, job_id) or {}
+            if not job:
+                self._send_json({"error": "Job not found."}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({**job, "events": DATA_STORE.job_events(self._request_user_id, job_id)})
+            return
+
         if path.startswith("/api/literature-search/"):
             job_id = path.rsplit("/", 1)[-1]
-            with JOBS_LOCK:
-                job = dict(JOBS.get(job_id, {}))
+            job = DATA_STORE.job(self._request_user_id, job_id) or {}
             if not job:
                 self._send_json({"error": "Job not found."}, HTTPStatus.NOT_FOUND)
                 return
@@ -142,8 +294,7 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/literature-analysis/"):
             job_id = path.rsplit("/", 1)[-1]
-            with JOBS_LOCK:
-                job = dict(JOBS.get(job_id, {}))
+            job = DATA_STORE.job(self._request_user_id, job_id) or {}
             if not job:
                 self._send_json({"error": "Job not found."}, HTTPStatus.NOT_FOUND)
                 return
@@ -152,8 +303,7 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/novelty-check/"):
             job_id = path.rsplit("/", 1)[-1]
-            with JOBS_LOCK:
-                job = dict(JOBS.get(job_id, {}))
+            job = DATA_STORE.job(self._request_user_id, job_id) or {}
             if not job:
                 self._send_json({"error": "Job not found."}, HTTPStatus.NOT_FOUND)
                 return
@@ -164,6 +314,20 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/auth/logout":
+            user = self._require_authenticated_user()
+            if not user or not self._require_csrf(user):
+                return
+            DATA_STORE.revoke_session(self._session_token())
+            self._clear_session_cookie()
+            self._send_json({"ok": True})
+            return
+        if path.startswith("/api/"):
+            user = self._require_authenticated_user()
+            if not user or not self._require_csrf(user):
+                return
+            self._request_user_id = user["id"]
+            CURRENT_USER_ID.set(user["id"])
         if path == "/api/export/pdf":
             self._handle_pdf_export()
             return
@@ -188,6 +352,24 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/account":
+            user = self._require_authenticated_user()
+            if not user or not self._require_csrf(user):
+                return
+            DATA_STORE.delete_user(user["id"])
+            with JOBS_LOCK:
+                for job_id, job in list(JOBS.items()):
+                    if job.get("owner_user_id") == user["id"]:
+                        JOBS.pop(job_id, None)
+            self._clear_session_cookie()
+            self._send_json({"ok": True})
+            return
+        if path.startswith("/api/"):
+            user = self._require_authenticated_user()
+            if not user or not self._require_csrf(user):
+                return
+            self._request_user_id = user["id"]
+            CURRENT_USER_ID.set(user["id"])
         if path.startswith("/api/history/"):
             history_id = path.rsplit("/", 1)[-1]
             if self._delete_history_entry(history_id):
@@ -198,8 +380,91 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def _cookie(self, name: str) -> str | None:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except (KeyError, ValueError):
+            return None
+        morsel = cookie.get(name)
+        return morsel.value if morsel else None
+
+    def _session_token(self) -> str | None:
+        return self._cookie("research_session")
+
+    def _authenticated_user(self) -> dict | None:
+        return DATA_STORE.session_user(self._session_token())
+
+    def _require_authenticated_user(self) -> dict | None:
+        user = self._authenticated_user()
+        if not user:
+            self._send_json({"error": "Authentication required."}, HTTPStatus.UNAUTHORIZED)
+            return None
+        return user
+
+    def _require_csrf(self, user: dict) -> bool:
+        provided = self.headers.get("X-CSRF-Token", "")
+        if not provided or not hmac.compare_digest(provided, str(user["csrf_token"])):
+            self._send_json({"error": "CSRF validation failed."}, HTTPStatus.FORBIDDEN)
+            return False
+        return True
+
+    def _set_session_cookie(self, token: str) -> None:
+        self.send_header("Set-Cookie", f"research_session={token}; Path=/; Max-Age={int(os.getenv('SESSION_TTL_SECONDS', '28800'))}; HttpOnly; Secure; SameSite=Lax")
+
+    def _clear_session_cookie(self) -> None:
+        self._clear_session_on_response = True
+
+    def _begin_oidc_login(self) -> None:
+        if not OIDC.enabled:
+            self._send_json({"error": "OIDC is not configured."}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        OIDC_STATES[state] = (nonce, time.time() + 600)
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", OIDC.authorization_url(state, nonce))
+        self.end_headers()
+
+    def _complete_oidc_login(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        state, code = str((query.get("state") or [""])[0]), str((query.get("code") or [""])[0])
+        pending = OIDC_STATES.pop(state, None)
+        if not pending or pending[1] < time.time() or not code:
+            self._send_json({"error": "Invalid or expired OIDC login state."}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            claims = OIDC.complete(code)
+            user = DATA_STORE.provision_user(str(claims["sub"]), str(claims.get("email") or ""), str(claims.get("name") or claims.get("preferred_username") or ""))
+            token, _csrf = DATA_STORE.create_session(user["id"])
+            self.send_response(HTTPStatus.FOUND)
+            self._set_session_cookie(token)
+            self.send_header("Location", "/")
+            self.end_headers()
+        except Exception as error:
+            self._send_json({"error": f"OIDC login failed: {error}"}, HTTPStatus.UNAUTHORIZED)
+
     def _search_route_service(self) -> SearchRouteService:
         return SearchRouteService(self, JOBS, JOBS_LOCK)
+
+    def _create_durable_job(self, kind: str, request: dict) -> tuple[dict, bool]:
+        owner = str(CURRENT_USER_ID.get() or "")
+        if not owner or not DATA_STORE.user_exists(owner):
+            raise RuntimeError("An authenticated owner is required to create a job.")
+        key = str(self.headers.get("Idempotency-Key", "") or "").strip()[:255]
+        expires_at = datetime.fromtimestamp(
+            time.time() + int(os.getenv("JOB_RETENTION_DAYS", "30")) * 86400,
+            timezone.utc,
+        ).isoformat(timespec="seconds")
+        return DATA_STORE.create_job(owner, kind, request, idempotency_key=key, expires_at=expires_at)
+
+    def _enqueue_durable_job(self, job_id: str) -> str:
+        from src.research_agent.web_tasks import enqueue_job
+
+        task_id = enqueue_job(job_id)
+        owner = str(CURRENT_USER_ID.get() or "")
+        if owner:
+            DATA_STORE.save_job(owner, job_id, {"task_id": task_id, "status": "queued", "stage": "Queued for worker", "progress": 0})
+        return task_id
 
     def _handle_literature_search(self) -> None:
         return self._search_route_service()._handle_literature_search()
@@ -277,6 +542,9 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
                 return
             pdf = markdown_to_pdf_bytes(title, markdown)
             filename = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "_", title).strip("_")[:80] or "research_report"
+            owner = CURRENT_USER_ID.get()
+            if owner:
+                DATA_STORE.store_file(owner, "exports", f"{filename}.pdf", pdf, int(os.getenv("EXPORT_RETENTION_DAYS", "30")))
             send_binary(
                 self,
                 pdf,
@@ -737,6 +1005,42 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             return PDF_EXTRACT_PAGE_LIMIT
 
     @staticmethod
+    def _pdf_upload_max_page_count() -> int:
+        return ResearchWebHandler._bounded_int(
+            os.getenv("PDF_UPLOAD_MAX_PAGE_COUNT"),
+            default=PDF_UPLOAD_MAX_PAGE_COUNT,
+            minimum=1,
+            maximum=5000,
+        )
+
+    @staticmethod
+    def _max_upload_extracted_text_chars() -> int:
+        return ResearchWebHandler._bounded_int(
+            os.getenv("MAX_UPLOAD_EXTRACTED_TEXT_CHARS"),
+            default=MAX_UPLOAD_EXTRACTED_TEXT_CHARS,
+            minimum=10_000,
+            maximum=2_000_000,
+        )
+
+    @staticmethod
+    def _upload_parse_timeout_seconds() -> int:
+        return ResearchWebHandler._bounded_int(
+            os.getenv("UPLOAD_PARSE_TIMEOUT_SECONDS"),
+            default=UPLOAD_PARSE_TIMEOUT_SECONDS,
+            minimum=1,
+            maximum=300,
+        )
+
+    @staticmethod
+    def _pdf_parser_sandbox_enabled() -> bool:
+        return not str(os.getenv("PDF_PARSER_SANDBOX", "enabled") or "").strip().casefold() in {
+            "off",
+            "disabled",
+            "false",
+            "0",
+        }
+
+    @staticmethod
     def _pdf_parser_mode() -> str:
         raw = str(os.getenv("PDF_PARSER", "auto") or "").strip().casefold()
         if raw in {"basic", "default", "pypdf", "pymupdf"}:
@@ -767,18 +1071,96 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
     def _normalize_extracted_text(value: str) -> str:
         return normalize_extracted_text(value)
 
+    @staticmethod
+    def _upload_security_policy() -> UploadSecurityPolicy:
+        total_mb = ResearchWebHandler._bounded_int(
+            os.getenv("MAX_UPLOAD_TOTAL_MB") or os.getenv("MAX_PDF_UPLOAD_MB"),
+            default=MAX_PDF_UPLOAD_MB,
+            minimum=1,
+            maximum=200,
+        )
+        file_mb = ResearchWebHandler._bounded_int(
+            os.getenv("MAX_UPLOAD_FILE_MB"),
+            default=MAX_PDF_UPLOAD_FILE_MB,
+            minimum=1,
+            maximum=200,
+        )
+        docx_unzipped_mb = ResearchWebHandler._bounded_int(
+            os.getenv("MAX_DOCX_UNZIPPED_MB"),
+            default=MAX_DOCX_UNZIPPED_MB,
+            minimum=1,
+            maximum=500,
+        )
+        docx_xml_mb = ResearchWebHandler._bounded_int(
+            os.getenv("MAX_DOCX_XML_MB"),
+            default=MAX_DOCX_XML_MB,
+            minimum=1,
+            maximum=200,
+        )
+        return UploadSecurityPolicy(
+            max_total_bytes=total_mb * 1024 * 1024,
+            max_total_mb=total_mb,
+            max_file_bytes=file_mb * 1024 * 1024,
+            max_file_mb=file_mb,
+            max_file_count=ResearchWebHandler._bounded_int(
+                os.getenv("MAX_UPLOAD_FILES"),
+                default=MAX_PDF_UPLOAD_FILES,
+                minimum=1,
+                maximum=50,
+            ),
+            max_docx_uncompressed_bytes=docx_unzipped_mb * 1024 * 1024,
+            max_docx_xml_bytes=docx_xml_mb * 1024 * 1024,
+            max_docx_zip_entries=ResearchWebHandler._bounded_int(
+                os.getenv("MAX_DOCX_ZIP_ENTRIES"),
+                default=MAX_DOCX_ZIP_ENTRIES,
+                minimum=5,
+                maximum=10_000,
+            ),
+            max_docx_compression_ratio=ResearchWebHandler._bounded_int(
+                os.getenv("MAX_DOCX_COMPRESSION_RATIO"),
+                default=MAX_DOCX_COMPRESSION_RATIO,
+                minimum=1,
+                maximum=10_000,
+            ),
+            max_extracted_text_chars=ResearchWebHandler._max_upload_extracted_text_chars(),
+            virus_scan_mode=os.getenv("UPLOAD_VIRUS_SCAN", "off"),
+            clamav_host=os.getenv("CLAMAV_HOST", "127.0.0.1"),
+            clamav_port=ResearchWebHandler._bounded_int(
+                os.getenv("CLAMAV_PORT"),
+                default=3310,
+                minimum=1,
+                maximum=65535,
+            ),
+            clamav_timeout_seconds=float(
+                ResearchWebHandler._bounded_int(
+                    os.getenv("CLAMAV_TIMEOUT_SECONDS"),
+                    default=10,
+                    minimum=1,
+                    maximum=120,
+                )
+            ),
+        )
+
     def _read_pdf_uploads_with_fields(
         self,
         *,
         allow_empty: bool = False,
     ) -> tuple[list[tuple[str, bytes]], list[dict], dict[str, str]]:
-        return read_multipart_uploads(
+        policy = ResearchWebHandler._upload_security_policy()
+        files, references, fields = read_multipart_uploads(
             headers=self.headers,
             rfile=self.rfile,
-            max_upload_bytes=MAX_PDF_UPLOAD_BYTES,
-            max_upload_mb=MAX_PDF_UPLOAD_MB,
+            max_upload_bytes=policy.max_total_bytes,
+            max_upload_mb=policy.max_total_mb,
+            security_policy=policy,
             allow_empty=allow_empty,
         )
+        owner = CURRENT_USER_ID.get()
+        owner = owner if DATA_STORE.user_exists(owner) else None
+        if owner:
+            for filename, content in files:
+                DATA_STORE.store_file(owner, "uploads", filename, content, int(os.getenv("UPLOAD_RETENTION_DAYS", "30")))
+        return files, references, fields
 
     @staticmethod
     def _multipart_fields(form) -> dict[str, str]:
@@ -957,7 +1339,7 @@ Rules:
             content,
             expected_context=expected_context,
             extract_pdf_content=ResearchWebHandler._extract_pdf_content,
-            extract_docx_text=extract_docx_text,
+            extract_docx_text=ResearchWebHandler._extract_docx_text,
             build_high_information_package=lambda text: LiteratureAnalysisWorkflow._high_information_excerpt(
                 text,
                 max_chars=PDF_REFERENCE_EXCERPT_CHARS,
@@ -965,6 +1347,14 @@ Rules:
             extract_doi_func=extract_doi,
             extract_arxiv_id_func=extract_arxiv_id,
             extract_pmid_func=extract_pmid,
+        )
+
+    @staticmethod
+    def _extract_docx_text(content: bytes) -> str:
+        return extract_docx_text(
+            content,
+            policy=ResearchWebHandler._upload_security_policy(),
+            max_text_chars=ResearchWebHandler._max_upload_extracted_text_chars(),
         )
 
     @staticmethod
@@ -983,7 +1373,7 @@ Rules:
 
     @staticmethod
     def _extract_pdf_content(content: bytes) -> dict:
-        return web_pdf_extract._extract_pdf_content(
+        extracted = web_pdf_extract._extract_pdf_content(
             content,
             pdf_parser_mode=ResearchWebHandler._pdf_parser_mode,
             extract_pdf_content_basic=ResearchWebHandler._extract_pdf_content_basic,
@@ -994,9 +1384,22 @@ Rules:
             ),
             extract_pdf_content_with_opendataloader=ResearchWebHandler._extract_pdf_content_with_opendataloader,
         )
+        extracted["text"] = truncate_extracted_text(
+            str(extracted.get("text") or ""),
+            ResearchWebHandler._max_upload_extracted_text_chars(),
+        )
+        return extracted
 
     @staticmethod
     def _extract_pdf_content_basic(content: bytes) -> dict:
+        if ResearchWebHandler._pdf_parser_sandbox_enabled():
+            return web_pdf_extract._extract_pdf_content_sandboxed(
+                content,
+                page_limit=ResearchWebHandler._pdf_extract_page_limit(),
+                max_page_count=ResearchWebHandler._pdf_upload_max_page_count(),
+                max_text_chars=ResearchWebHandler._max_upload_extracted_text_chars(),
+                timeout_seconds=ResearchWebHandler._upload_parse_timeout_seconds(),
+            )
         return web_pdf_extract._extract_pdf_content_basic(
             content,
             pdf_extract_page_limit=ResearchWebHandler._pdf_extract_page_limit,
@@ -1086,6 +1489,11 @@ Rules:
 
     @staticmethod
     def _history_entries(limit: int = 200, *, summary: bool = False) -> list[dict]:
+        owner = CURRENT_USER_ID.get()
+        owner = owner if DATA_STORE.user_exists(owner) else None
+        if owner:
+            entries = DATA_STORE.histories(owner, limit)
+            return [history_entry_summary(entry) for entry in entries] if summary else entries
         with HISTORY_LOCK:
             data = ResearchWebHandler._read_history_data_unlocked()
             if ResearchWebHandler._reconcile_history_jobs_unlocked(data):
@@ -1109,6 +1517,10 @@ Rules:
         history_id = str(history_id or "").strip()
         if not history_id:
             return None
+        owner = CURRENT_USER_ID.get()
+        owner = owner if DATA_STORE.user_exists(owner) else None
+        if owner:
+            return DATA_STORE.history(owner, history_id)
         with HISTORY_LOCK:
             data = ResearchWebHandler._read_history_data_unlocked()
             if ResearchWebHandler._reconcile_history_jobs_unlocked(data):
@@ -1123,6 +1535,10 @@ Rules:
         history_id = str(history_id or "").strip()
         if not history_id:
             return False
+        owner = CURRENT_USER_ID.get()
+        owner = owner if DATA_STORE.user_exists(owner) else None
+        if owner:
+            return DATA_STORE.delete_history(owner, history_id)
         with HISTORY_LOCK:
             data = ResearchWebHandler._read_history_data_unlocked()
             items = data.get("items", [])
@@ -1173,6 +1589,10 @@ Rules:
         }
         if error:
             entry["error"] = error
+        owner = CURRENT_USER_ID.get()
+        owner = owner if DATA_STORE.user_exists(owner) else None
+        if owner:
+            return DATA_STORE.create_history(owner, entry)
         with HISTORY_LOCK:
             data = ResearchWebHandler._read_history_data_unlocked()
             items = data.setdefault("items", [])
@@ -1302,6 +1722,19 @@ Rules:
         if not history_id:
             return
         now = datetime.now().isoformat(timespec="seconds")
+        if DATA_STORE.update_history_internal(
+            history_id,
+            lambda entry: apply_history_entry_update(
+                entry,
+                now,
+                status=status,
+                stage=stage,
+                result=result,
+                counts=counts,
+                error=error,
+            ),
+        ):
+            return
         with HISTORY_LOCK:
             data = ResearchWebHandler._read_history_data_unlocked()
             items = data.get("items", [])
@@ -1540,6 +1973,16 @@ Rules:
         return parse_byte_range(range_header, file_size)
 
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+        if getattr(self, "_clear_session_on_response", False):
+            self._clear_session_on_response = False
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Set-Cookie", "research_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         send_json(self, payload, status)
 
     @staticmethod

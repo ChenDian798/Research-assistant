@@ -1,5 +1,7 @@
 # Research Assistant
 
+Public deployment note: before exposing this app to the internet, apply the reverse-proxy template in `deploy/nginx-research-agent.conf`. It sets `client_max_body_size 30m`, matching `MAX_UPLOAD_TOTAL_MB=30`; see `deploy/README.md`.
+
 当前项目只保留一个核心 Web 功能：**文献分析**。
 
 文献分析支持输入 DOI、PMID、arXiv 链接、论文页面链接，或上传 PDF/DOCX，生成结构化文献分析表、跨文献总结和可导出的 Markdown/TXT/PDF 报告。
@@ -60,6 +62,24 @@ http://127.0.0.1:8000
 - `POST /api/literature-analysis/pdf`
 - `GET /api/literature-analysis/{job_id}`
 - `POST /api/export/pdf`
+
+## Durable production runtime
+
+Production uses PostgreSQL as the source of truth, Redis/Celery for execution,
+and private S3/MinIO storage for uploaded documents and generated exports. Start
+the backing services with `docker compose -f docker-compose.persistence.yml up -d`,
+set the matching `DATABASE_URL`, `CELERY_BROKER_URL`, and S3 variables in `.env`,
+then start a worker with:
+
+```powershell
+celery -A src.research_agent.web_tasks.celery_app worker --loglevel=INFO --queues=research-jobs
+```
+
+The API writes a queued job to the database before it submits the Celery message.
+Workers re-load `request_json`, append `job_events`, and persist the terminal
+result/error. `Idempotency-Key` is supported on long-running POST endpoints.
+`history_records.json` is imported once into `history_entries` (a backup is kept)
+and is not the authenticated production read path.
 
 长任务会返回 `job_id`，前端通过对应的 `GET` 接口轮询状态。
 

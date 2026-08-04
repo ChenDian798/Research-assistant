@@ -1,8 +1,12 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import io
 import json
 from pathlib import Path
+import threading
+import time
+import zipfile
 
 import pytest
 
@@ -28,7 +32,8 @@ from src.research_agent.paper_search import (
 )
 from src.research_agent.reference_relevance import apply_relevance_gate, assess_reference_relevance
 from src.research_agent.reference_screening import screen_reference
-from src.research_agent.reference_verification import verify_reference
+from src.research_agent.reference_verification import verify_reference, verify_references
+from src.research_agent import web_uploads
 import web_app
 from web_app import ResearchWebHandler
 
@@ -291,6 +296,93 @@ def test_pdf_upload_fields_preserve_requested_output_language() -> None:
     fields = ResearchWebHandler._multipart_fields(FakeMultipartForm())
 
     assert fields["output_language"] == "en"
+
+
+def _minimal_docx_bytes(document_xml: str | None = None) -> bytes:
+    document_xml = document_xml or (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>Hello DOCX</w:t></w:r></w:p></w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types></Types>")
+        archive.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
+
+
+def test_upload_validation_rejects_extension_mismatch() -> None:
+    policy = web_uploads.UploadSecurityPolicy(max_file_bytes=1024 * 1024, max_file_mb=1)
+
+    with pytest.raises(ValueError, match="does not match"):
+        web_uploads._validated_upload_file("paper.pdf", _minimal_docx_bytes(), policy=policy)
+
+
+def test_upload_validation_rejects_oversized_single_file() -> None:
+    policy = web_uploads.UploadSecurityPolicy(max_file_bytes=10, max_file_mb=1)
+
+    with pytest.raises(ValueError, match="too large"):
+        web_uploads._validated_upload_file("paper.pdf", b"%PDF-1.7\n" + b"A" * 20, policy=policy)
+
+
+def test_upload_validation_rejects_docx_zip_bomb_ratio() -> None:
+    policy = web_uploads.UploadSecurityPolicy(
+        max_file_bytes=1024 * 1024,
+        max_file_mb=1,
+        max_docx_compression_ratio=2,
+    )
+    large_repeated_text = "A" * 50_000
+    docx = _minimal_docx_bytes(
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body><w:p><w:r><w:t>{large_repeated_text}</w:t></w:r></w:p></w:body></w:document>"
+    )
+
+    with pytest.raises(ValueError, match="compression ratio"):
+        web_uploads._validated_upload_file("paper.docx", docx, policy=policy)
+
+
+def test_docx_text_extraction_still_accepts_valid_docx() -> None:
+    policy = web_uploads.UploadSecurityPolicy(max_file_bytes=1024 * 1024, max_file_mb=1)
+
+    text = web_uploads.extract_docx_text(_minimal_docx_bytes(), policy=policy)
+
+    assert text == "Hello DOCX"
+
+
+def test_required_virus_scan_rejects_when_scanner_unavailable(monkeypatch) -> None:
+    policy = web_uploads.UploadSecurityPolicy(
+        max_file_bytes=1024 * 1024,
+        max_file_mb=1,
+        virus_scan_mode="required",
+    )
+
+    def unavailable(*args, **kwargs):
+        raise OSError("clamd down")
+
+    monkeypatch.setattr(web_uploads, "clamav_instream_scan", unavailable)
+
+    with pytest.raises(ValueError, match="scanner is unavailable"):
+        web_uploads._validated_upload_file("paper.pdf", b"%PDF-1.7\n", policy=policy)
+
+
+def test_sandboxed_pdf_extraction_returns_page_count(tmp_path) -> None:
+    from pypdf import PdfWriter
+
+    pdf_path = tmp_path / "blank.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    extracted = web_app.web_pdf_extract._extract_pdf_content_sandboxed(
+        pdf_path.read_bytes(),
+        page_limit=1,
+        max_page_count=2,
+        max_text_chars=10_000,
+        timeout_seconds=10,
+    )
+
+    assert extracted["page_count"] == 1
+    assert extracted["extracted_pages"] == 0
 
 
 def test_literature_analysis_job_passes_output_language_to_workflow(monkeypatch, tmp_path) -> None:
@@ -3607,6 +3699,73 @@ def test_reference_verification_demotes_unresolvable_doi(monkeypatch) -> None:
     assert "doi_resolution_failed" in verified["verification_risks"]
 
 
+def test_reference_verification_runs_candidates_concurrently_and_keeps_order(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_VERIFY_CONCURRENCY", "3")
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def fake_verify(reference: dict) -> dict:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {**reference, "verification_status": "verified"}
+
+    monkeypatch.setattr("src.research_agent.reference_verification.verify_reference", fake_verify)
+
+    verified = verify_references([{"title": "A"}, {"title": "B"}, {"title": "C"}])
+
+    assert [item["title"] for item in verified] == ["A", "B", "C"]
+    assert peak >= 2
+
+
+def test_search_backend_runs_independent_source_queries_concurrently(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_SEARCH_SOURCE_CONCURRENCY", "2")
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def fake_backend(query: str, *, sources: list[str], **kwargs) -> dict:
+        nonlocal active, peak
+        del query, kwargs
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {"results": {source: [{"title": source, "source": source}] for source in sources}, "errors": {}}
+
+    monkeypatch.setattr(paper_search, "run_paper_search_backend", fake_backend)
+
+    payload = paper_search.run_paper_search_backend_by_source(
+        {"semantic": "query one", "crossref": "query two"},
+        max_results_per_source=1,
+        year="",
+        timeout_seconds=1,
+    )
+
+    assert peak >= 2
+    assert set(payload["results"]) == {"semantic", "crossref"}
+
+
+def test_dedupe_papers_merges_source_provenance_and_best_abstract() -> None:
+    deduped = paper_search.dedupe_papers(
+        [
+            {"title": "Paper", "doi": "10.1000/example", "abstract": "short", "retrieved_from": "semantic"},
+            {"title": "Paper", "doi": "10.1000/example", "abstract": "a longer abstract", "retrieved_from": "crossref"},
+        ]
+    )
+
+    assert len(deduped) == 1
+    assert deduped[0]["abstract"] == "a longer abstract"
+    assert deduped[0]["retrieved_from_sources"] == ["semantic", "crossref"]
+
+
 def test_unverified_search_candidate_moves_to_needs_review() -> None:
     qualified, needs_review = ResearchWebHandler._split_verified_search_candidates(
         [{"title": "Unverified DOI paper", "verification_status": "unverified", "screening_risks": []}],
@@ -3748,10 +3907,12 @@ def test_literature_search_job_endpoint_returns_job() -> None:
         "status": "running",
         "kind": "literature_search",
         "stage": "Searching literature...",
+        "owner_user_id": "test-user",
     }
     handler = object.__new__(ResearchWebHandler)
     handler.path = f"/api/literature-search/{job_id}"
     handler._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)
+    handler._require_authenticated_user = lambda: {"id": "test-user"}
 
     handler.do_GET()
 
@@ -3919,6 +4080,8 @@ def test_history_delete_endpoint_returns_ok(monkeypatch, tmp_path) -> None:
     handler = object.__new__(ResearchWebHandler)
     handler.path = f"/api/history/{history_id}"
     handler._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)
+    handler._require_authenticated_user = lambda: {"id": "test-user"}
+    handler._require_csrf = lambda user: True
 
     handler.do_DELETE()
 
@@ -5409,6 +5572,7 @@ def test_uploaded_pdf_reference_extracts_wrapped_title() -> None:
 
 def test_pdf_extraction_skips_pages_that_pypdf_cannot_read(monkeypatch, capsys) -> None:
     pypdf = pytest.importorskip("pypdf")
+    monkeypatch.setenv("PDF_PARSER_SANDBOX", "disabled")
 
     class FakePage:
         def __init__(self, text: str | None = None, error: Exception | None = None) -> None:
@@ -5442,6 +5606,7 @@ def test_pdf_extraction_skips_pages_that_pypdf_cannot_read(monkeypatch, capsys) 
 
 def test_pdf_extraction_uses_pymupdf_fallback_when_pypdf_fails(monkeypatch) -> None:
     pypdf = pytest.importorskip("pypdf")
+    monkeypatch.setenv("PDF_PARSER_SANDBOX", "disabled")
 
     class BrokenPage:
         def extract_text(self) -> str:

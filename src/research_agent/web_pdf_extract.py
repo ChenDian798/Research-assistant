@@ -4,6 +4,8 @@ import importlib
 import io
 import json
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -120,6 +122,65 @@ def _extract_pdf_content_basic(
         "metadata": metadata,
         "note": note,
     }
+
+
+def _extract_pdf_content_sandboxed(
+    content: bytes,
+    *,
+    page_limit: int | None,
+    max_page_count: int,
+    max_text_chars: int,
+    timeout_seconds: int,
+    python_executable: str | None = None,
+) -> dict:
+    page_limit_arg = "all" if page_limit is None else str(max(1, int(page_limit)))
+    executable = python_executable or sys.executable
+    with tempfile.TemporaryDirectory(prefix="research_pdf_sandbox_") as temp_dir:
+        input_path = Path(temp_dir) / "upload.pdf"
+        input_path.write_bytes(content)
+        command = [
+            executable,
+            "-m",
+            "src.research_agent.pdf_sandbox_worker",
+            "--input",
+            str(input_path),
+            "--page-limit",
+            page_limit_arg,
+            "--max-page-count",
+            str(max(0, int(max_page_count))),
+            "--max-text-chars",
+            str(max(1000, int(max_text_chars))),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(1, int(timeout_seconds)),
+                cwd=str(Path(__file__).resolve().parents[2]),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("PDF parsing timed out and was stopped for safety.") from error
+
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            detail = stderr or stdout[-500:] or "no parser output"
+            raise ValueError(f"PDF parser returned an invalid response: {detail}") from error
+        if completed.returncode != 0 or payload.get("error"):
+            raise ValueError(str(payload.get("error") or stderr or "PDF parsing failed."))
+        return {
+            "text": str(payload.get("text") or ""),
+            "page_count": int(payload.get("page_count") or 0),
+            "extracted_pages": int(payload.get("extracted_pages") or 0),
+            "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            "note": str(payload.get("note") or ""),
+        }
 
 
 def _should_try_opendataloader_pdf(
