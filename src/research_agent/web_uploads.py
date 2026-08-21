@@ -356,7 +356,16 @@ def clamav_instream_scan(
     port: int,
     timeout_seconds: float,
 ) -> None:
-    with socket.create_connection((host, port), timeout=timeout_seconds) as sock:
+    target = str(host or "").strip()
+    if target.startswith("unix:"):
+        target = target.removeprefix("unix:")
+    if target.startswith("/"):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout_seconds)
+        sock.connect(target)
+    else:
+        sock = socket.create_connection((target, port), timeout=timeout_seconds)
+    with sock:
         sock.settimeout(timeout_seconds)
         sock.sendall(b"zINSTREAM\0")
         chunk_size = 1024 * 1024

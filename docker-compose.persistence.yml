@@ -20,7 +20,12 @@ services:
     ports: ["9000:9000", "9001:9001"]
     command: ["server", "/data", "--console-address", ":9001"]
     volumes: ["minio-data:/data"]
+  clamav:
+    image: clamav/clamav:stable
+    ports: ["3310:3310"]
+    volumes: ["clamav-data:/var/lib/clamav"]
 volumes:
   postgres-data:
   redis-data:
   minio-data:
+  clamav-data:

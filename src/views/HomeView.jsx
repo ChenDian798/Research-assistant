@@ -131,15 +131,25 @@ export default function HomeView({ onNavigate, t }) {
                   <i />
                 </span>
               </div>
-              <video
-                className="search-flow-intro__video"
-                src="/videos/search-flow-intro.mp4"
-                autoPlay
-                muted
-                loop
-                playsInline
-                controls
-              />
+              <div className="search-flow-intro__preview" aria-hidden="true">
+                <div className="search-flow-intro__preview-search">
+                  <span />
+                  <i />
+                </div>
+                <div className="search-flow-intro__preview-grid">
+                  <div className="search-flow-intro__preview-steps">
+                    <span className="is-active">{t("home.noteTopic")}</span>
+                    <span>{t("home.noteSelect")}</span>
+                    <span>{t("home.noteConfirm")}</span>
+                  </div>
+                  <div className="search-flow-intro__preview-results">
+                    <strong />
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>

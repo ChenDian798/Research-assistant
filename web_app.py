@@ -76,6 +76,12 @@ from src.research_agent.web_utils import (
 
 
 ROOT = Path(__file__).resolve().parent
+SUPPORTED_PYTHON = (3, 12)
+if sys.version_info[:2] != SUPPORTED_PYTHON:
+    raise RuntimeError(
+        "Research Assistant is pinned to Python 3.12.x for this release. "
+        "Use Python 3.12.13, or update the multipart upload parser before moving to Python 3.13+."
+    )
 load_dotenv(ROOT / ".env" if (ROOT / ".env").exists() else ROOT / ".env.example")
 WEB_DIR = ROOT / "web"
 WEB_DIST_DIR = WEB_DIR / "dist"

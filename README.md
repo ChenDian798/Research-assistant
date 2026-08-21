@@ -8,16 +8,29 @@ Public deployment note: before exposing this app to the internet, apply the reve
 
 ## 快速开始
 
+本项目当前固定使用 **Python 3.12.13**。仓库提供：
+
+- `.python-version`：给 pyenv / mise / asdf 等工具读取。
+- `runtime.txt`：给支持该文件的平台读取。
+- `web_app.py` 启动时会拒绝 Python 3.13+，因为当前上传解析仍依赖 Python 3.12 中可用的 multipart 相关能力。
+
+创建本地虚拟环境：
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+```
+
 安装运行依赖：
 
 ```powershell
-pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 如需运行测试，安装开发依赖：
 
 ```powershell
-pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
 创建配置文件：
@@ -41,7 +54,7 @@ SESSION_TTL_SECONDS=28800
 启动 Web 服务：
 
 ```powershell
-python web_app.py 8000
+.venv\Scripts\python.exe web_app.py 8000
 ```
 
 开发环境默认访问：
@@ -108,6 +121,30 @@ and is not the authenticated production read path.
 
 长任务会返回 `job_id`，前端通过对应的 `GET` 接口轮询状态。
 
+## 上传安全
+
+内测/生产环境建议使用 `.env.example` 中的严格上传配置：
+
+```text
+MAX_UPLOAD_TOTAL_MB=30
+MAX_UPLOAD_FILE_MB=15
+MAX_UPLOAD_FILES=4
+PDF_UPLOAD_MAX_PAGE_COUNT=300
+MAX_UPLOAD_EXTRACTED_TEXT_CHARS=300000
+UPLOAD_PARSE_TIMEOUT_SECONDS=30
+PDF_PARSER_SANDBOX=enabled
+MAX_DOCX_UNZIPPED_MB=20
+MAX_DOCX_XML_MB=10
+MAX_DOCX_ZIP_ENTRIES=200
+MAX_DOCX_COMPRESSION_RATIO=100
+UPLOAD_VIRUS_SCAN=required
+CLAMAV_HOST=127.0.0.1
+CLAMAV_PORT=3310
+CLAMAV_TIMEOUT_SECONDS=10
+```
+
+`docker-compose.persistence.yml` 已包含 ClamAV 服务，启动后会在 `127.0.0.1:3310` 提供 clamd 扫描。`UPLOAD_VIRUS_SCAN=required` 表示扫描服务不可用时拒绝上传；如果只是本地离线调试，可临时改为 `UPLOAD_VIRUS_SCAN=off`。
+
 可选环境变量：
 
 ```text
@@ -133,7 +170,9 @@ non_runtime/                       示例、测试题集、交接材料和回归
 ## 测试
 
 ```powershell
-python -m pytest non_runtime/tests -q
+$env:DATABASE_URL='sqlite:///tmp/pytest-research.db'
+$env:USER_FILE_ROOT='tmp/pytest-user-files'
+.venv\Scripts\python.exe -m pytest non_runtime/tests -q -p no:cacheprovider
 ```
 
 当前测试覆盖：
