@@ -85,10 +85,16 @@ if sys.version_info[:2] != SUPPORTED_PYTHON:
 load_dotenv(ROOT / ".env" if (ROOT / ".env").exists() else ROOT / ".env.example")
 WEB_DIR = ROOT / "web"
 WEB_DIST_DIR = WEB_DIR / "dist"
-OUTPUT_DIR = ROOT / "outputs"
-LOG_DIR = ROOT / "logs"
-ANNOTATION_RECORD_PATH = ROOT / "non_runtime" / "annotation_records" / "检索标注记录.md"
-HISTORY_PATH = ROOT / "history_records.json"
+RUNTIME_DIR = Path(os.getenv("RESEARCH_AGENT_RUNTIME_DIR", str(ROOT))).expanduser().resolve()
+OUTPUT_DIR = RUNTIME_DIR / "outputs"
+LOG_DIR = RUNTIME_DIR / "logs"
+ANNOTATION_RECORD_PATH = Path(
+    os.getenv(
+        "SEARCH_ANNOTATION_RECORD_PATH",
+        str(RUNTIME_DIR / "annotation_records" / "检索标注记录.md"),
+    )
+).expanduser().resolve()
+HISTORY_PATH = RUNTIME_DIR / "history_records.json"
 MAX_PDF_UPLOAD_MB = 30
 MAX_PDF_UPLOAD_BYTES = MAX_PDF_UPLOAD_MB * 1024 * 1024
 MAX_PDF_UPLOAD_FILE_MB = 15
@@ -105,11 +111,11 @@ PDF_REFERENCE_EXCERPT_CHARS = 10000
 CONTEXT_DOCUMENT_EXCERPT_CHARS = 4000
 JOBS: dict[str, dict[str, object]] = {}
 JOBS_LOCK = threading.Lock()
-HISTORY_LOCK_PATH = ROOT / "history_records.lock"
+HISTORY_LOCK_PATH = RUNTIME_DIR / "history_records.lock"
 
 
 HISTORY_LOCK = ProcessFileLock(HISTORY_LOCK_PATH)
-DATA_STORE = UserDataStore(ROOT)
+DATA_STORE = UserDataStore(RUNTIME_DIR)
 configure_store(DATA_STORE)
 DATA_STORE.migrate_legacy_history(HISTORY_PATH)
 DATA_STORE.enforce_retention(int(os.getenv("DATA_RETENTION_DAYS", "90")))

@@ -1,0 +1,15 @@
+[Unit]
+Description=Research Assistant web application
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/research-agent
+ExecStart=/opt/research-agent/.venv/bin/python /opt/research-agent/web_app.py 8000
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

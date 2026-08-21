@@ -31,11 +31,20 @@ MAX_UPLOAD_TOTAL_MB=30
 ## Deployment checklist
 
 1. Use Python 3.12.13 for the API and worker processes.
+   Copy `deploy/research-agent.env.example` to
+   `/etc/research-agent/research-agent.env`, replace every placeholder, and set
+   ownership to `root:research-agent` with mode `0640`.
 2. Start the backing services, including ClamAV:
 
    ```bash
-   docker compose -f docker-compose.persistence.yml up -d
+   sudo docker compose \
+     --env-file /etc/research-agent/research-agent.env \
+     -f docker-compose.persistence.yml up -d
    ```
+
+   Compose binds PostgreSQL, Redis, MinIO, and ClamAV to `127.0.0.1` only.
+   Before starting it, set `POSTGRES_PASSWORD`, `MINIO_ROOT_USER`, and
+   `MINIO_ROOT_PASSWORD` in `/etc/research-agent/research-agent.env`.
 
 3. Set upload safety variables in `.env`:
 
@@ -57,10 +66,23 @@ MAX_UPLOAD_TOTAL_MB=30
    CLAMAV_TIMEOUT_SECONDS=10
    ```
 
-4. Copy `deploy/nginx-research-agent.conf` into the server's Nginx sites directory.
-5. Replace `server_name example.com;` with the real domain.
-6. Confirm the app is listening on the configured upstream, default `127.0.0.1:8000`.
-7. Enable the site and validate Nginx:
+4. Install the Web and Celery systemd units and their shared security settings:
+
+   ```bash
+   sudo install -m 0644 deploy/research-agent-web.service /etc/systemd/system/
+   sudo install -m 0644 deploy/research-agent-worker.service /etc/systemd/system/
+   sudo install -d -m 0755 /etc/systemd/system/research-agent-web.service.d
+   sudo install -d -m 0755 /etc/systemd/system/research-agent-worker.service.d
+   sudo install -m 0644 deploy/research-agent-security.conf /etc/systemd/system/research-agent-web.service.d/security.conf
+   sudo install -m 0644 deploy/research-agent-security.conf /etc/systemd/system/research-agent-worker.service.d/security.conf
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now research-agent-web research-agent-worker
+   ```
+
+5. Copy `deploy/nginx-research-agent.conf` into the server's Nginx sites directory.
+6. Replace `server_name example.com;` with the real domain.
+7. Confirm the app is listening on the configured upstream, default `127.0.0.1:8000`.
+8. Enable the site and validate Nginx:
 
    ```bash
    nginx -t
