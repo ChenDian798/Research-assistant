@@ -63,7 +63,8 @@ def test_users_cannot_read_delete_or_poll_each_others_resources(isolated_store):
     assert sent["payload"]["owner_user_id"] == user_a["id"]
 
 
-def test_cookie_flags_and_csrf_protection(isolated_store):
+def test_cookie_flags_and_csrf_protection(isolated_store, monkeypatch):
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "true")
     _user, token, csrf = _user_session(isolated_store, "oidc-a")
     handler, sent = _handler("/api/export/pdf", f"research_session={token}")
     handler.do_POST()
@@ -99,3 +100,60 @@ def test_user_deletion_removes_owned_records_jobs_and_files(isolated_store):
     assert isolated_store.history(user["id"], "history-delete") is None
     assert isolated_store.job(user["id"], "job-delete") is None
     assert not file_path.exists()
+
+
+def test_local_user_login_and_disabled_status(isolated_store):
+    user = isolated_store.create_local_user("local@example.test", "password-123", "Local User")
+    authenticated = isolated_store.authenticate_local_user("LOCAL@example.test", "password-123")
+    assert authenticated["id"] == user["id"]
+    assert authenticated["role"] == "user"
+
+    assert isolated_store.authenticate_local_user("local@example.test", "wrong-password") is None
+    isolated_store.update_user_admin(user["id"], user["id"], status="disabled")
+    with pytest.raises(PermissionError):
+        isolated_store.authenticate_local_user("local@example.test", "password-123")
+
+
+def test_admin_user_management_and_last_admin_guard(isolated_store):
+    admin = isolated_store.create_local_user("admin@example.test", "password-123", "Admin", role="admin")
+    user = isolated_store.create_local_user("user@example.test", "password-123", "User")
+
+    updated = isolated_store.update_user_admin(admin["id"], user["id"], role="admin")
+    assert updated["role"] == "admin"
+    assert isolated_store.admin_user_count() == 2
+
+    isolated_store.update_user_admin(admin["id"], user["id"], role="user")
+    with pytest.raises(ValueError):
+        isolated_store.update_user_admin(admin["id"], admin["id"], role="user")
+
+
+def test_admin_created_user_can_login(isolated_store):
+    admin = isolated_store.create_local_user("admin-create@example.test", "password-123", "Admin", role="admin")
+    user = isolated_store.create_local_user("invited@example.test", "initial-123", "Invited")
+    isolated_store.audit(admin["id"], "user.admin_created", "user", user["id"])
+
+    authenticated = isolated_store.authenticate_local_user("invited@example.test", "initial-123")
+    assert authenticated["id"] == user["id"]
+    assert authenticated["status"] == "active"
+
+
+def test_evaluation_run_persists_items_and_stage_events(isolated_store):
+    admin = isolated_store.create_local_user("eval-admin@example.test", "password-123", "Eval Admin", role="admin")
+    run_id = isolated_store.create_evaluation_run(
+        admin["id"],
+        "smoke evaluation",
+        "literature_search",
+        {"sources": "arxiv", "concurrency": 1},
+        ["query one", "query two"],
+    )
+    items = isolated_store.evaluation_items_for_run(run_id)
+    assert len(items) == 2
+
+    isolated_store.update_evaluation_item(items[0]["id"], status="done", result={"timings": {"planning_seconds": 0.1}}, total_duration_ms=150, started=True, finished=True)
+    isolated_store.add_evaluation_stage_event(items[0]["id"], "planning", duration_ms=100, output_count=2)
+    isolated_store.update_evaluation_run(run_id, status="running")
+    detail = isolated_store.evaluation_run_detail(admin["id"], run_id)
+
+    assert detail["completed_count"] == 1
+    assert detail["items"][0]["status"] == "done"
+    assert detail["items"][0]["events"][0]["stage"] == "planning"

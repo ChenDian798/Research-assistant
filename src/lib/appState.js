@@ -1,6 +1,6 @@
 import { normalizeLiteratureSummary } from "./formatters.js";
 
-export const allowedViews = ["home", "direct", "standaloneSearch", "novelty", "search", "results", "history"];
+export const allowedViews = ["home", "direct", "standaloneSearch", "novelty", "search", "results", "history", "auth", "admin", "evaluation"];
 
 const legacyViewMap = { literature: "home" };
 

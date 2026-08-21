@@ -11,6 +11,7 @@ const navItems = [
 ];
 
 export default function Topbar({ currentView, language, onLanguageChange, onNavigate, user, authLoading, onLogin, onLogout, t }) {
+  const visibleNavItems = user?.role === "admin" ? [...navItems, ["evaluation", "nav.evaluation"], ["admin", "nav.admin"]] : navItems;
   return (
     <header className="app-topbar" aria-label={t("nav.aria")}>
       <div className="brand">
@@ -21,7 +22,7 @@ export default function Topbar({ currentView, language, onLanguageChange, onNavi
         </span>
       </div>
       <div className="topbar-actions">
-        {navItems.map(([view, labelKey]) => (
+        {visibleNavItems.map(([view, labelKey]) => (
           <button
             className={`ghost-button ${currentView === view ? "is-active" : ""}`}
             type="button"
@@ -35,9 +36,12 @@ export default function Topbar({ currentView, language, onLanguageChange, onNavi
       </div>
       <div className="topbar-right">
         {authLoading ? null : user ? (
-          <button className="account-button" type="button" onClick={onLogout} title={user.email || user.display_name}>
-            {language === "en" ? "Sign out" : "退出登录"}
-          </button>
+          <>
+            <span className="account-label" title={user.email || user.display_name}>{user.display_name || user.email}</span>
+            <button className="account-button" type="button" onClick={onLogout} title={user.email || user.display_name}>
+              {language === "en" ? "Sign out" : "退出登录"}
+            </button>
+          </>
         ) : (
           <button className="account-button account-button--login" type="button" onClick={onLogin}>
             {language === "en" ? "Sign in" : "登录"}

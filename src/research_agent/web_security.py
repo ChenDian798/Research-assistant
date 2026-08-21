@@ -31,6 +31,41 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+PASSWORD_HASH_VERSION = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 310_000
+
+
+def normalize_email(value: str) -> str:
+    return str(value or "").strip().casefold()
+
+
+def password_hash(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS)
+    return "$".join(
+        (
+            PASSWORD_HASH_VERSION,
+            str(PASSWORD_HASH_ITERATIONS),
+            base64.urlsafe_b64encode(salt).decode("ascii").rstrip("="),
+            base64.urlsafe_b64encode(digest).decode("ascii").rstrip("="),
+        )
+    )
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        version, iterations_text, salt_text, digest_text = str(encoded or "").split("$", 3)
+        if version != PASSWORD_HASH_VERSION:
+            return False
+        iterations = int(iterations_text)
+        salt = base64.urlsafe_b64decode(salt_text + "=" * (-len(salt_text) % 4))
+        expected = base64.urlsafe_b64decode(digest_text + "=" * (-len(digest_text) % 4))
+    except (ValueError, TypeError):
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(digest, expected)
+
+
 def configure_store(store: "UserDataStore") -> None:
     global _STORE
     _STORE = store
@@ -166,11 +201,36 @@ class UserDataStore:
                 f"CREATE INDEX IF NOT EXISTS documents_owner_created ON documents(owner_user_id, created_at DESC)",
                 f"CREATE TABLE IF NOT EXISTS artifacts (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, job_id {identity} REFERENCES jobs(id) ON DELETE SET NULL, kind {identity} NOT NULL, object_key {identity} NOT NULL, content_type {identity}, created_at {identity} NOT NULL, expires_at {identity})",
                 f"CREATE TABLE IF NOT EXISTS audit_logs (id {identity} PRIMARY KEY, actor_user_id {identity}, action {identity} NOT NULL, resource_type {identity} NOT NULL, resource_id {identity}, detail {json_type}, created_at {identity} NOT NULL)",
+                f"CREATE TABLE IF NOT EXISTS evaluation_runs (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, name {identity} NOT NULL, kind {identity} NOT NULL, status {identity} NOT NULL, request_json {json_type} NOT NULL, total_count INTEGER NOT NULL, completed_count INTEGER NOT NULL DEFAULT 0, created_at {identity} NOT NULL, updated_at {identity} NOT NULL, finished_at {identity})",
+                f"CREATE INDEX IF NOT EXISTS evaluation_runs_owner_updated ON evaluation_runs(owner_user_id, updated_at DESC)",
+                f"CREATE TABLE IF NOT EXISTS evaluation_items (id {identity} PRIMARY KEY, run_id {identity} NOT NULL REFERENCES evaluation_runs(id) ON DELETE CASCADE, query {identity} NOT NULL, status {identity} NOT NULL, total_duration_ms INTEGER, result_json {json_type}, error {identity}, created_at {identity} NOT NULL, started_at {identity}, finished_at {identity})",
+                f"CREATE INDEX IF NOT EXISTS evaluation_items_run_created ON evaluation_items(run_id, created_at)",
+                f"CREATE TABLE IF NOT EXISTS evaluation_stage_events (id {identity} PRIMARY KEY, item_id {identity} NOT NULL REFERENCES evaluation_items(id) ON DELETE CASCADE, stage {identity} NOT NULL, source {identity}, duration_ms INTEGER, input_count INTEGER, output_count INTEGER, detail_json {json_type}, created_at {identity} NOT NULL)",
+                f"CREATE INDEX IF NOT EXISTS evaluation_stage_events_item_created ON evaluation_stage_events(item_id, created_at)",
             ):
                 self._execute(connection, statement)
+            self._ensure_user_columns(connection, identity)
             self._ensure_job_columns(connection, identity, json_type)
             self._migrate_legacy_tables(connection)
             connection.commit()
+
+    def _ensure_user_columns(self, connection, identity: str) -> None:
+        columns = {
+            "password_hash": identity,
+            "role": f"{identity} NOT NULL DEFAULT 'user'",
+            "status": f"{identity} NOT NULL DEFAULT 'active'",
+            "email_verified": "INTEGER NOT NULL DEFAULT 1",
+            "last_login_at": identity,
+        }
+        if self._postgres:
+            for name, definition in columns.items():
+                self._execute(connection, f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {name} {definition}")
+        else:
+            existing = {row[1] for row in self._execute(connection, "PRAGMA table_info(users)").fetchall()}
+            for name, definition in columns.items():
+                if name not in existing:
+                    self._execute(connection, f"ALTER TABLE users ADD COLUMN {name} {definition}")
+        self._execute(connection, "CREATE UNIQUE INDEX IF NOT EXISTS users_active_email_unique ON users(email) WHERE deleted_at IS NULL AND email IS NOT NULL AND email <> ''")
 
     def _ensure_job_columns(self, connection, identity: str, json_type: str) -> None:
         """Add explicit job fields without invalidating existing SQLite databases."""
@@ -246,12 +306,69 @@ class UserDataStore:
         existing = self._fetchone("SELECT * FROM users WHERE oidc_subject = ? AND deleted_at IS NULL", (subject,))
         if existing:
             return existing
-        user = {"id": uuid.uuid4().hex, "oidc_subject": subject, "email": email, "display_name": display_name, "created_at": utc_now()}
+        user = {"id": uuid.uuid4().hex, "oidc_subject": subject, "email": normalize_email(email), "display_name": display_name, "created_at": utc_now()}
         with self._connect() as connection:
-            self._execute(connection, "INSERT INTO users (id, oidc_subject, email, display_name, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, NULL)", tuple(user.values()))
+            self._execute(connection, "INSERT INTO users (id, oidc_subject, email, display_name, created_at, deleted_at, role, status, email_verified) VALUES (?, ?, ?, ?, ?, NULL, 'user', 'active', 1)", tuple(user.values()))
             connection.commit()
         self.audit(user["id"], "user.provisioned", "user", user["id"])
         return user
+
+    def create_local_user(self, email: str, password: str, display_name: str = "", *, role: str = "user") -> dict:
+        email = normalize_email(email)
+        display_name = str(display_name or "").strip() or email.split("@", 1)[0]
+        role = "admin" if role == "admin" else "user"
+        if not email or "@" not in email:
+            raise ValueError("请输入有效邮箱。")
+        if len(password or "") < 8:
+            raise ValueError("密码至少需要 8 位。")
+        user = {
+            "id": uuid.uuid4().hex,
+            "oidc_subject": f"local:{email}",
+            "email": email,
+            "display_name": display_name,
+            "created_at": utc_now(),
+            "password_hash": password_hash(password),
+            "role": role,
+            "status": "active",
+        }
+        with self._connect() as connection:
+            existing = self._execute(connection, "SELECT id FROM users WHERE email=? AND deleted_at IS NULL", (email,)).fetchone()
+            if existing:
+                raise ValueError("该邮箱已注册。")
+            self._execute(
+                connection,
+                "INSERT INTO users (id, oidc_subject, email, display_name, created_at, deleted_at, password_hash, role, status, email_verified) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 1)",
+                (user["id"], user["oidc_subject"], user["email"], user["display_name"], user["created_at"], user["password_hash"], user["role"], user["status"]),
+            )
+            connection.commit()
+        self.audit(user["id"], "user.created", "user", user["id"], {"role": role, "source": "local"})
+        return self.public_user(user)
+
+    def authenticate_local_user(self, email: str, password: str) -> dict | None:
+        email = normalize_email(email)
+        row = self._fetchone("SELECT * FROM users WHERE email=? AND deleted_at IS NULL", (email,))
+        if not row or not row.get("password_hash") or not verify_password(password or "", str(row.get("password_hash") or "")):
+            return None
+        if row.get("status") != "active":
+            raise PermissionError("该账号已被禁用，请联系管理员。")
+        now = utc_now()
+        with self._connect() as connection:
+            self._execute(connection, "UPDATE users SET last_login_at=? WHERE id=?", (now, row["id"]))
+            connection.commit()
+        row["last_login_at"] = now
+        self.audit(row["id"], "auth.login", "user", row["id"])
+        return self.public_user(row)
+
+    def public_user(self, user: dict) -> dict:
+        return {
+            "id": user.get("id", ""),
+            "email": user.get("email", ""),
+            "display_name": user.get("display_name", ""),
+            "role": user.get("role") or "user",
+            "status": user.get("status") or "active",
+            "created_at": user.get("created_at", ""),
+            "last_login_at": user.get("last_login_at", ""),
+        }
 
     def user_exists(self, user_id: str | None) -> bool:
         return bool(user_id and self._fetchone("SELECT id FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)))
@@ -268,8 +385,8 @@ class UserDataStore:
     def session_user(self, token: str | None) -> dict | None:
         if not token:
             return None
-        row = self._fetchone("SELECT s.csrf_token, s.expires_at, u.id, u.email, u.display_name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND u.deleted_at IS NULL", (hashlib.sha256(token.encode()).hexdigest(),))
-        if not row or row["expires_at"] <= utc_now():
+        row = self._fetchone("SELECT s.csrf_token, s.expires_at, u.id, u.email, u.display_name, u.role, u.status FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND u.deleted_at IS NULL", (hashlib.sha256(token.encode()).hexdigest(),))
+        if not row or row["expires_at"] <= utc_now() or row.get("status") != "active":
             return None
         return row
 
@@ -463,6 +580,168 @@ class UserDataStore:
             self.object_storage.delete(row[0])
         shutil.rmtree(self.file_root / owner, ignore_errors=True)
         self.audit(owner, "user.deleted", "user", owner)
+
+    def admin_user_count(self) -> int:
+        row = self._fetchone("SELECT COUNT(*) AS count FROM users WHERE role='admin' AND deleted_at IS NULL")
+        return int((row or {}).get("count") or 0)
+
+    def list_users(self, limit: int = 200) -> list[dict]:
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT
+                    u.id, u.email, u.display_name, u.role, u.status, u.created_at, u.last_login_at,
+                    COUNT(DISTINCT h.id) AS history_count,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COUNT(DISTINCT f.id) AS file_count
+                FROM users u
+                LEFT JOIN history_entries h ON h.owner_user_id = u.id
+                LEFT JOIN jobs j ON j.owner_user_id = u.id
+                LEFT JOIN files f ON f.owner_user_id = u.id
+                WHERE u.deleted_at IS NULL
+                GROUP BY u.id, u.email, u.display_name, u.role, u.status, u.created_at, u.last_login_at
+                ORDER BY u.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        users = []
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                item = dict(row)
+            else:
+                columns = ("id", "email", "display_name", "role", "status", "created_at", "last_login_at", "history_count", "job_count", "file_count")
+                item = dict(zip(columns, row))
+            users.append(item)
+        return users
+
+    def update_user_admin(self, actor: str, user_id: str, *, role: str | None = None, status: str | None = None, display_name: str | None = None) -> dict | None:
+        existing = self._fetchone("SELECT * FROM users WHERE id=? AND deleted_at IS NULL", (user_id,))
+        if not existing:
+            return None
+        next_role = existing.get("role") or "user"
+        next_status = existing.get("status") or "active"
+        next_display_name = existing.get("display_name") or ""
+        if role is not None:
+            next_role = "admin" if role == "admin" else "user"
+        if status is not None:
+            if status not in {"active", "disabled"}:
+                raise ValueError("用户状态只能是 active 或 disabled。")
+            next_status = status
+        if display_name is not None:
+            next_display_name = str(display_name or "").strip()
+        if existing.get("role") == "admin" and next_role != "admin" and self.admin_user_count() <= 1:
+            raise ValueError("至少需要保留一个管理员。")
+        if existing.get("role") == "admin" and next_status != "active" and self.admin_user_count() <= 1:
+            raise ValueError("不能禁用最后一个管理员。")
+        with self._connect() as connection:
+            self._execute(connection, "UPDATE users SET role=?, status=?, display_name=? WHERE id=?", (next_role, next_status, next_display_name, user_id))
+            if next_status != "active":
+                self._execute(connection, "DELETE FROM sessions WHERE user_id=?", (user_id,))
+            connection.commit()
+        self.audit(actor, "user.admin_updated", "user", user_id, {"role": next_role, "status": next_status})
+        return self.public_user({**existing, "role": next_role, "status": next_status, "display_name": next_display_name})
+
+    def create_evaluation_run(self, owner: str, name: str, kind: str, request: dict, queries: list[str]) -> str:
+        run_id, now = uuid.uuid4().hex, utc_now()
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "INSERT INTO evaluation_runs (id, owner_user_id, name, kind, status, request_json, total_count, completed_count, created_at, updated_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)",
+                (run_id, owner, name, kind, "queued", json.dumps(request, ensure_ascii=False), len(queries), now, now),
+            )
+            for query in queries:
+                self._execute(
+                    connection,
+                    "INSERT INTO evaluation_items (id, run_id, query, status, total_duration_ms, result_json, error, created_at, started_at, finished_at) VALUES (?, ?, ?, 'queued', NULL, ?, NULL, ?, NULL, NULL)",
+                    (uuid.uuid4().hex, run_id, query, json.dumps({}, ensure_ascii=False), now),
+                )
+            connection.commit()
+        self.audit(owner, "evaluation.created", "evaluation", run_id, {"kind": kind, "count": len(queries)})
+        return run_id
+
+    def evaluation_runs(self, owner: str, limit: int = 50) -> list[dict]:
+        with self._connect() as connection:
+            cursor = self._execute(connection, "SELECT * FROM evaluation_runs WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT ?", (owner, limit))
+            rows = cursor.fetchall()
+            columns = [item[0] for item in cursor.description]
+        return [self._evaluation_run_from_row(dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))) for row in rows]
+
+    def evaluation_run_detail(self, owner: str, run_id: str) -> dict | None:
+        run = self._fetchone("SELECT * FROM evaluation_runs WHERE id=? AND owner_user_id=?", (run_id, owner))
+        if not run:
+            return None
+        detail = self._evaluation_run_from_row(run)
+        with self._connect() as connection:
+            item_cursor = self._execute(connection, "SELECT * FROM evaluation_items WHERE run_id=? ORDER BY created_at", (run_id,))
+            item_rows = item_cursor.fetchall()
+            item_columns = [item[0] for item in item_cursor.description]
+            items = []
+            for row in item_rows:
+                item = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(item_columns, row))
+                event_cursor = self._execute(connection, "SELECT stage, source, duration_ms, input_count, output_count, detail_json, created_at FROM evaluation_stage_events WHERE item_id=? ORDER BY created_at", (item["id"],))
+                event_rows = event_cursor.fetchall()
+                events = []
+                for event_row in event_rows:
+                    if isinstance(event_row, sqlite3.Row):
+                        event = dict(event_row)
+                    else:
+                        event = dict(zip([column[0] for column in event_cursor.description], event_row))
+                    event["detail"] = json.loads(event.pop("detail_json") or "{}")
+                    events.append(event)
+                item["result"] = json.loads(item.pop("result_json") or "{}")
+                item["events"] = events
+                items.append(item)
+        detail["items"] = items
+        return detail
+
+    def evaluation_items_for_run(self, run_id: str) -> list[dict]:
+        with self._connect() as connection:
+            cursor = self._execute(connection, "SELECT * FROM evaluation_items WHERE run_id=? ORDER BY created_at", (run_id,))
+            rows = cursor.fetchall()
+            columns = [item[0] for item in cursor.description]
+        items = []
+        for row in rows:
+            item = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))
+            item["result"] = json.loads(item.pop("result_json") or "{}")
+            items.append(item)
+        return items
+
+    def update_evaluation_run(self, run_id: str, *, status: str, finished: bool = False) -> None:
+        now = utc_now()
+        finished_at = now if finished else None
+        with self._connect() as connection:
+            if finished:
+                self._execute(connection, "UPDATE evaluation_runs SET status=?, completed_count=(SELECT COUNT(*) FROM evaluation_items WHERE run_id=? AND status IN ('done','error')), updated_at=?, finished_at=? WHERE id=?", (status, run_id, now, finished_at, run_id))
+            else:
+                self._execute(connection, "UPDATE evaluation_runs SET status=?, completed_count=(SELECT COUNT(*) FROM evaluation_items WHERE run_id=? AND status IN ('done','error')), updated_at=? WHERE id=?", (status, run_id, now, run_id))
+            connection.commit()
+
+    def update_evaluation_item(self, item_id: str, *, status: str, result: dict | None = None, error: str = "", total_duration_ms: int | None = None, started: bool = False, finished: bool = False) -> None:
+        now = utc_now()
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "UPDATE evaluation_items SET status=?, result_json=?, error=?, total_duration_ms=?, started_at=COALESCE(started_at, ?), finished_at=?, WHERE id=?".replace(", WHERE", " WHERE"),
+                (status, json.dumps(result or {}, ensure_ascii=False), error or None, total_duration_ms, now if started else None, now if finished else None, item_id),
+            )
+            connection.commit()
+
+    def add_evaluation_stage_event(self, item_id: str, stage: str, *, source: str = "", duration_ms: int | None = None, input_count: int | None = None, output_count: int | None = None, detail: dict | None = None) -> None:
+        with self._connect() as connection:
+            self._execute(
+                connection,
+                "INSERT INTO evaluation_stage_events (id, item_id, stage, source, duration_ms, input_count, output_count, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, item_id, stage, source or None, duration_ms, input_count, output_count, json.dumps(detail or {}, ensure_ascii=False), utc_now()),
+            )
+            connection.commit()
+
+    @staticmethod
+    def _evaluation_run_from_row(row: dict) -> dict:
+        item = dict(row)
+        item["request"] = json.loads(item.pop("request_json") or "{}")
+        return item
 
     def enforce_retention(self, days: int) -> None:
         cutoff = datetime.fromtimestamp(time.time() - days * 86400, timezone.utc).isoformat(timespec="seconds")

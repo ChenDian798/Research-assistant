@@ -7,6 +7,9 @@ import NoveltyCheckView from "./views/NoveltyCheckView.jsx";
 import SearchFlowView from "./views/SearchFlowView.jsx";
 import ResultsView from "./views/ResultsView.jsx";
 import HistoryView from "./views/HistoryView.jsx";
+import AuthView from "./views/AuthView.jsx";
+import AdminView from "./views/AdminView.jsx";
+import EvaluationView from "./views/EvaluationView.jsx";
 import {
   buildLiteratureTopic,
   createEmptyAnalysisResult,
@@ -25,11 +28,12 @@ import {
 } from "./lib/formatters.js";
 import {
   deleteHistoryEntry,
-  apiPath,
   fetchCurrentUser,
   fetchHistoryEntries,
   fetchHistoryEntry,
+  login,
   readJsonResponse,
+  register,
   submitCombinedLiteratureAnalysis,
   submitLinkLiteratureAnalysis,
   submitLiteratureSearchRequest,
@@ -1155,6 +1159,10 @@ export default function App() {
   }
 
   function handleTopbarNavigate(view) {
+    if ((view === "admin" || view === "evaluation") && currentUser?.role !== "admin") {
+      navigate("auth");
+      return;
+    }
     if (view === "direct" && (analysisRunning.direct || analysisResultsBySource.direct.rows.length || analysisResultsBySource.direct.summary)) {
       setActiveAnalysisSource("direct");
       navigate("results");
@@ -1182,6 +1190,18 @@ export default function App() {
     searchAnalysisQueued
   );
 
+  async function handleAuthLogin(email, password) {
+    const user = await login(email, password);
+    setCurrentUser(user);
+    navigate(user?.role === "admin" ? "admin" : "home");
+  }
+
+  async function handleAuthRegister({ email, password, displayName }) {
+    const user = await register({ email, password, displayName });
+    setCurrentUser(user);
+    navigate("home");
+  }
+
   return (
     <>
       <Topbar
@@ -1191,7 +1211,7 @@ export default function App() {
         onNavigate={handleTopbarNavigate}
         user={currentUser}
         authLoading={authLoading}
-        onLogin={() => window.location.assign(apiPath("/auth/login"))}
+        onLogin={() => navigate("auth")}
         onLogout={async () => {
           await logout();
           setCurrentUser(null);
@@ -1200,6 +1220,19 @@ export default function App() {
         t={t}
       />
       <main className={`shell shell--${currentView}`}>
+        {currentView === "auth" ? (
+          <AuthView
+            onLogin={handleAuthLogin}
+            onRegister={handleAuthRegister}
+            t={t}
+          />
+        ) : null}
+        {currentView === "admin" && currentUser?.role === "admin" ? (
+          <AdminView currentUser={currentUser} t={t} />
+        ) : null}
+        {currentView === "evaluation" && currentUser?.role === "admin" ? (
+          <EvaluationView t={t} />
+        ) : null}
         {currentView === "home" ? <HomeView onNavigate={navigate} t={t} /> : null}
         {currentView === "direct" ? (
           <DirectAnalysisView

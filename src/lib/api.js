@@ -10,7 +10,8 @@ export function apiPath(path) {
 export async function apiFetch(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const requestOptions = { ...options, credentials: "same-origin" };
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+  const csrfExempt = ["/api/auth/login", "/api/auth/register"].includes(path);
+  if (!csrfExempt && !["GET", "HEAD", "OPTIONS"].includes(method)) {
     if (!csrfToken) {
       const csrfResponse = await fetch(apiPath("/api/auth/csrf"), { credentials: "same-origin", cache: "no-store" });
       const csrfPayload = await readJsonResponse(csrfResponse);
@@ -36,11 +37,100 @@ export async function fetchCurrentUser() {
   return payload.user || null;
 }
 
+export async function login(email, password) {
+  const response = await apiFetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  csrfToken = null;
+  return payload.user || null;
+}
+
+export async function register({ email, password, displayName = "" }) {
+  const response = await apiFetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, display_name: displayName }),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  csrfToken = null;
+  return payload.user || null;
+}
+
 export async function logout() {
   const response = await apiFetch("/api/auth/logout", { method: "POST" });
   const payload = await readJsonResponse(response);
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   csrfToken = null;
+}
+
+export async function fetchAdminUsers() {
+  const response = await apiFetch("/api/admin/users", { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return Array.isArray(payload.users) ? payload.users : [];
+}
+
+export async function createAdminUser({ email, displayName = "", password = "", role = "user" }) {
+  const response = await apiFetch("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, display_name: displayName, password, role }),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+export async function updateAdminUser(userId, patch) {
+  const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload.user || null;
+}
+
+export async function deleteAdminUser(userId) {
+  const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+export async function createSearchEvaluation(payload) {
+  const response = await apiFetch("/api/admin/evaluations/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+export async function fetchEvaluations() {
+  const response = await apiFetch("/api/admin/evaluations", { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return Array.isArray(payload.runs) ? payload.runs : [];
+}
+
+export async function fetchEvaluationDetail(runId) {
+  const response = await apiFetch(`/api/admin/evaluations/${encodeURIComponent(runId)}`, { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+export function evaluationExportUrl(runId) {
+  return apiPath(`/api/admin/evaluations/${encodeURIComponent(runId)}/export.csv`);
 }
 
 export async function readJsonResponse(response) {

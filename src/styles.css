@@ -215,6 +215,16 @@ a:focus-visible {
   color: #ffffff;
 }
 
+.account-label {
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .language-toggle-button {
   min-height: 28px;
   padding: 0 10px;
@@ -286,6 +296,12 @@ a:focus-visible {
 
 .shell--history {
   width: min(1680px, calc(100% - 64px));
+}
+
+.shell--admin,
+.shell--evaluation,
+.shell--auth {
+  width: min(1440px, calc(100% - 56px));
 }
 
 .app-view,
@@ -4872,6 +4888,297 @@ select:focus {
   opacity: 1;
 }
 
+.auth-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(360px, 0.58fr);
+  gap: 28px;
+  align-items: start;
+  padding-top: 24px;
+}
+
+.auth-copy {
+  min-height: 420px;
+  display: grid;
+  align-content: center;
+  padding: 48px 28px;
+  border: 1px solid #e7edf7;
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(237, 248, 245, 0.92) 0%, rgba(255, 255, 255, 0.98) 45%, rgba(237, 243, 251, 0.9) 100%);
+}
+
+.auth-copy h1 {
+  max-width: 640px;
+  margin-bottom: 14px;
+  color: #0f172a;
+  font-size: clamp(36px, 4vw, 64px);
+  line-height: 1;
+  font-weight: 880;
+}
+
+.auth-panel {
+  overflow: hidden;
+}
+
+.auth-form {
+  display: grid;
+  gap: 16px;
+}
+
+.auth-field {
+  display: grid;
+  gap: 7px;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.admin-view {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-panel {
+  overflow: hidden;
+}
+
+.admin-create-form {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr 180px auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.admin-create-actions {
+  margin: 0;
+}
+
+.admin-created-password {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 13px 15px;
+  border: 1px solid rgba(47, 111, 240, 0.18);
+  border-radius: 12px;
+  background: #f5f9ff;
+  color: #20304a;
+}
+
+.admin-created-password span {
+  color: #5f7088;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.admin-created-password strong {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.admin-table-scroll {
+  overflow-x: auto;
+}
+
+.admin-table {
+  min-width: 980px;
+}
+
+.admin-table th:first-child,
+.admin-table td:first-child {
+  width: 260px;
+}
+
+.admin-table tbody th span {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 560;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.admin-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-row-actions .ghost-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.evaluation-view {
+  display: grid;
+  gap: 18px;
+}
+
+.evaluation-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  align-items: stretch;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.evaluation-main-input,
+.evaluation-settings {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.evaluation-main-input textarea {
+  min-height: 220px;
+}
+
+.evaluation-settings {
+  padding-top: 23px;
+}
+
+.evaluation-source-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.evaluation-source-list label,
+.evaluation-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #20304a;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.evaluation-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.evaluation-run-list {
+  position: sticky;
+  top: 84px;
+  display: grid;
+  gap: 8px;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+}
+
+.evaluation-run-item {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  text-align: left;
+}
+
+.evaluation-run-item.is-active {
+  border-color: rgba(49, 95, 156, 0.28);
+  background: #f6faff;
+}
+
+.evaluation-run-item strong,
+.evaluation-table strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.evaluation-run-item small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.evaluation-detail {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+}
+
+.evaluation-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.evaluation-detail-header h2 {
+  margin: 10px 0 5px;
+  color: #0f172a;
+  font-size: clamp(24px, 2vw, 34px);
+  line-height: 1.08;
+  font-weight: 860;
+}
+
+.evaluation-detail-header p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.evaluation-table {
+  min-width: 1180px;
+}
+
+.evaluation-stage-list,
+.evaluation-result-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.evaluation-stage-list span {
+  color: #20304a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.evaluation-result-list {
+  padding-left: 18px;
+}
+
+.evaluation-result-list li {
+  margin: 0;
+  color: #20304a;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ghost-button.danger {
+  border-color: rgba(182, 56, 45, 0.22);
+  color: #9f2d24;
+}
+
+.ghost-button.danger:hover:not(:disabled) {
+  border-color: rgba(182, 56, 45, 0.3);
+  background: var(--error-soft);
+}
+
 .history-item strong,
 .history-detail h2,
 .history-candidate-list strong {
@@ -5578,7 +5885,10 @@ select:focus {
   }
 
   .choice-grid,
+  .auth-layout,
   .direct-layout,
+  .evaluation-create,
+  .evaluation-layout,
   .direct-input-grid,
   .history-layout,
   .novelty-comparison-body,
@@ -5604,6 +5914,23 @@ select:focus {
   .history-list-panel {
     position: static;
     max-height: none;
+  }
+
+  .evaluation-run-list {
+    position: static;
+    max-height: 260px;
+  }
+
+  .auth-copy {
+    min-height: 260px;
+  }
+
+  .admin-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-create-form {
+    grid-template-columns: 1fr;
   }
 
   .search-flow-intro {

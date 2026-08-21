@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 from datetime import datetime, timezone
 import hmac
+import io
 import json
 import os
 import re
@@ -12,6 +14,7 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -78,7 +81,7 @@ WEB_DIR = ROOT / "web"
 WEB_DIST_DIR = WEB_DIR / "dist"
 OUTPUT_DIR = ROOT / "outputs"
 LOG_DIR = ROOT / "logs"
-ANNOTATION_RECORD_PATH = ROOT / "检索标注记录.md"
+ANNOTATION_RECORD_PATH = ROOT / "non_runtime" / "annotation_records" / "检索标注记录.md"
 HISTORY_PATH = ROOT / "history_records.json"
 MAX_PDF_UPLOAD_MB = 30
 MAX_PDF_UPLOAD_BYTES = MAX_PDF_UPLOAD_MB * 1024 * 1024
@@ -106,6 +109,7 @@ DATA_STORE.migrate_legacy_history(HISTORY_PATH)
 DATA_STORE.enforce_retention(int(os.getenv("DATA_RETENTION_DAYS", "90")))
 OIDC = OIDCClient()
 OIDC_STATES: dict[str, tuple[str, float]] = {}
+EVALUATION_THREADS: dict[str, threading.Thread] = {}
 
 
 class BackgroundJobHandler:
@@ -203,6 +207,115 @@ def mark_job_failed(job_id: str, error: Exception) -> None:
         CURRENT_USER_ID.reset(token)
 
 
+def seconds_to_ms(value) -> int | str:
+    try:
+        return int(round(float(value) * 1000))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _run_search_evaluation(run_id: str, owner: str) -> None:
+    token = CURRENT_USER_ID.set(owner)
+    try:
+        detail = DATA_STORE.evaluation_run_detail(owner, run_id)
+        if not detail:
+            return
+        request = detail.get("request") or {}
+        items = DATA_STORE.evaluation_items_for_run(run_id)
+        DATA_STORE.update_evaluation_run(run_id, status="running")
+        concurrency = bounded_int(request.get("concurrency"), default=3, minimum=1, maximum=8)
+
+        def run_item(item: dict) -> None:
+            started = time.monotonic()
+            item_id = str(item["id"])
+            query = str(item.get("query") or "").strip()
+            DATA_STORE.update_evaluation_item(item_id, status="running", started=True)
+            handler = object.__new__(ResearchWebHandler)
+            handler._server_port = lambda: "evaluation"
+            try:
+                item_request = {
+                    "query": query,
+                    "sources": request.get("sources") or "arxiv,pubmed",
+                    "search_mode": request.get("search_mode") or "auto",
+                    "year": request.get("year") or "",
+                    "max_results_per_source": int(request.get("max_results_per_source") or 5),
+                    "timeout_seconds": int(request.get("timeout_seconds") or 45),
+                    "include_needs_review": bool(request.get("include_needs_review", True)),
+                    "append_annotation_record": False,
+                }
+                result, _history_payload = SearchRouteService(handler, JOBS, JOBS_LOCK)._run_literature_search_pipeline(item_request)
+                total_ms = int(round((time.monotonic() - started) * 1000))
+                DATA_STORE.update_evaluation_item(item_id, status="done", result=_evaluation_public_result(result), total_duration_ms=total_ms, finished=True)
+                _record_evaluation_timing_events(item_id, result)
+            except Exception as error:
+                total_ms = int(round((time.monotonic() - started) * 1000))
+                message = f"{type(error).__name__}: {error}"
+                DATA_STORE.update_evaluation_item(item_id, status="error", error=message, total_duration_ms=total_ms, finished=True)
+                DATA_STORE.add_evaluation_stage_event(item_id, "error", duration_ms=total_ms, detail={"error": message})
+            finally:
+                DATA_STORE.update_evaluation_run(run_id, status="running")
+
+        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="search-eval") as executor:
+            futures = [executor.submit(run_item, item) for item in items]
+            for future in as_completed(futures):
+                future.result()
+        final_items = DATA_STORE.evaluation_items_for_run(run_id)
+        final_status = "error" if final_items and all(item.get("status") == "error" for item in final_items) else "done"
+        DATA_STORE.update_evaluation_run(run_id, status=final_status, finished=True)
+    except Exception:
+        traceback.print_exc()
+        DATA_STORE.update_evaluation_run(run_id, status="error", finished=True)
+    finally:
+        EVALUATION_THREADS.pop(run_id, None)
+        CURRENT_USER_ID.reset(token)
+
+
+def _evaluation_public_result(result: dict) -> dict:
+    keys = {
+        "query",
+        "search_mode",
+        "requested_search_mode",
+        "backend_query",
+        "queries_by_source",
+        "sources_used",
+        "qualified_references",
+        "needs_review_references",
+        "rejected_count",
+        "source_results",
+        "internal_source_results",
+        "timings",
+        "errors",
+        "raw_count",
+    }
+    return {key: result.get(key) for key in keys if key in result}
+
+
+def _record_evaluation_timing_events(item_id: str, result: dict) -> None:
+    timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+    stage_order = [
+        ("planning", "planning_seconds"),
+        ("recall", "recall_seconds"),
+        ("canonical_repair", "canonical_repair_seconds"),
+        ("screening", "screening_seconds"),
+        ("verification", "verification_seconds"),
+        ("pipeline_total", "pipeline_total_seconds"),
+    ]
+    raw_count = int(result.get("raw_count") or 0)
+    qualified_count = len(result.get("qualified_references") or [])
+    needs_review_count = len(result.get("needs_review_references") or [])
+    rejected_count = int(result.get("rejected_count") or 0)
+    for stage, key in stage_order:
+        duration = seconds_to_ms(timings.get(key))
+        if duration == "":
+            continue
+        output_count = raw_count if stage in {"planning", "recall", "canonical_repair"} else qualified_count + needs_review_count + rejected_count
+        DATA_STORE.add_evaluation_stage_event(item_id, stage, duration_ms=duration, output_count=output_count, detail={"timing_key": key})
+    source_results = result.get("internal_source_results") or result.get("source_results") or {}
+    if isinstance(source_results, dict):
+        for source, count in source_results.items():
+            DATA_STORE.add_evaluation_stage_event(item_id, "source_recall", source=str(source), output_count=int(count or 0), detail={"note": "source count; source-level duration is unavailable for CLI-backed sources"})
+
+
 def _enable_auto_file_logging(port: int | str = "") -> tuple[Path, Path] | None:
     return enable_auto_file_logging(LOG_DIR, port=port)
 
@@ -245,13 +358,40 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             if not user:
                 self._send_json({"error": "Authentication required."}, HTTPStatus.UNAUTHORIZED)
                 return
-            self._send_json({"user": {"id": user["id"], "email": user.get("email", ""), "display_name": user.get("display_name", "")}})
+            self._send_json({"user": self._public_current_user(user)})
             return
         if path == "/api/auth/csrf":
             user = self._require_authenticated_user()
             if not user:
                 return
             self._send_json({"csrf_token": user["csrf_token"]})
+            return
+        if path == "/api/admin/users":
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            self._send_json({"users": DATA_STORE.list_users()})
+            return
+        if path == "/api/admin/evaluations":
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            self._send_json({"runs": DATA_STORE.evaluation_runs(admin["id"])})
+            return
+        if path.startswith("/api/admin/evaluations/"):
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            suffix = path.removeprefix("/api/admin/evaluations/")
+            if suffix.endswith("/export.csv"):
+                run_id = suffix.removesuffix("/export.csv")
+                self._send_evaluation_csv(admin["id"], run_id)
+                return
+            detail = DATA_STORE.evaluation_run_detail(admin["id"], suffix)
+            if not detail:
+                self._send_json({"error": "Evaluation run not found."}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(detail)
             return
 
         if path.startswith("/api/"):
@@ -314,6 +454,12 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/auth/register":
+            self._handle_register()
+            return
+        if path == "/api/auth/login":
+            self._handle_password_login()
+            return
         if path == "/api/auth/logout":
             user = self._require_authenticated_user()
             if not user or not self._require_csrf(user):
@@ -321,6 +467,18 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             DATA_STORE.revoke_session(self._session_token())
             self._clear_session_cookie()
             self._send_json({"ok": True})
+            return
+        if path == "/api/admin/users":
+            admin = self._require_admin_user()
+            if not admin or not self._require_csrf(admin):
+                return
+            self._handle_admin_create_user(admin)
+            return
+        if path == "/api/admin/evaluations/search":
+            admin = self._require_admin_user()
+            if not admin or not self._require_csrf(admin):
+                return
+            self._handle_create_search_evaluation(admin)
             return
         if path.startswith("/api/"):
             user = self._require_authenticated_user()
@@ -352,6 +510,24 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/api/admin/users/"):
+            admin = self._require_admin_user()
+            if not admin or not self._require_csrf(admin):
+                return
+            user_id = path.rsplit("/", 1)[-1]
+            if user_id == admin["id"]:
+                self._send_json({"error": "不能删除当前登录的管理员账号。"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not DATA_STORE.user_exists(user_id):
+                self._send_json({"error": "User not found."}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                DATA_STORE.delete_user(user_id)
+            except Exception as error:
+                self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json({"ok": True})
+            return
         if path == "/api/account":
             user = self._require_authenticated_user()
             if not user or not self._require_csrf(user):
@@ -380,6 +556,32 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def do_PATCH(self) -> None:
+        path = urlparse(self.path).path
+        if path.startswith("/api/admin/users/"):
+            admin = self._require_admin_user()
+            if not admin or not self._require_csrf(admin):
+                return
+            user_id = path.rsplit("/", 1)[-1]
+            try:
+                payload = self._read_json()
+                updated = DATA_STORE.update_user_admin(
+                    admin["id"],
+                    user_id,
+                    role=payload.get("role") if "role" in payload else None,
+                    status=payload.get("status") if "status" in payload else None,
+                    display_name=payload.get("display_name") if "display_name" in payload else None,
+                )
+            except ValueError as error:
+                self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            if not updated:
+                self._send_json({"error": "User not found."}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"user": updated})
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
     def _cookie(self, name: str) -> str | None:
         cookie = SimpleCookie()
         try:
@@ -402,6 +604,15 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             return None
         return user
 
+    def _require_admin_user(self) -> dict | None:
+        user = self._require_authenticated_user()
+        if not user:
+            return None
+        if user.get("role") != "admin":
+            self._send_json({"error": "Administrator permission required."}, HTTPStatus.FORBIDDEN)
+            return None
+        return user
+
     def _require_csrf(self, user: dict) -> bool:
         provided = self.headers.get("X-CSRF-Token", "")
         if not provided or not hmac.compare_digest(provided, str(user["csrf_token"])):
@@ -410,10 +621,165 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
         return True
 
     def _set_session_cookie(self, token: str) -> None:
-        self.send_header("Set-Cookie", f"research_session={token}; Path=/; Max-Age={int(os.getenv('SESSION_TTL_SECONDS', '28800'))}; HttpOnly; Secure; SameSite=Lax")
+        secure = "; Secure" if truthy(os.getenv("SESSION_COOKIE_SECURE", "true")) else ""
+        self.send_header("Set-Cookie", f"research_session={token}; Path=/; Max-Age={int(os.getenv('SESSION_TTL_SECONDS', '28800'))}; HttpOnly{secure}; SameSite=Lax")
 
     def _clear_session_cookie(self) -> None:
         self._clear_session_on_response = True
+
+    @staticmethod
+    def _public_current_user(user: dict) -> dict:
+        return {
+            "id": user.get("id", ""),
+            "email": user.get("email", ""),
+            "display_name": user.get("display_name", ""),
+            "role": user.get("role") or "user",
+            "status": user.get("status") or "active",
+        }
+
+    def _handle_register(self) -> None:
+        if not truthy(os.getenv("ALLOW_SELF_REGISTRATION", "true")):
+            self._send_json({"error": "当前未开放自助注册。"}, HTTPStatus.FORBIDDEN)
+            return
+        try:
+            payload = self._read_json()
+            user = DATA_STORE.create_local_user(
+                str(payload.get("email") or ""),
+                str(payload.get("password") or ""),
+                str(payload.get("display_name") or ""),
+            )
+            token, _csrf = DATA_STORE.create_session(user["id"])
+            self.send_response(HTTPStatus.CREATED)
+            self._set_session_cookie(token)
+            body = json.dumps({"user": user}, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def _handle_password_login(self) -> None:
+        try:
+            payload = self._read_json()
+            user = DATA_STORE.authenticate_local_user(str(payload.get("email") or ""), str(payload.get("password") or ""))
+        except PermissionError as error:
+            self._send_json({"error": str(error)}, HTTPStatus.FORBIDDEN)
+            return
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if not user:
+            self._send_json({"error": "邮箱或密码错误。"}, HTTPStatus.UNAUTHORIZED)
+            return
+        token, _csrf = DATA_STORE.create_session(user["id"])
+        self.send_response(HTTPStatus.OK)
+        self._set_session_cookie(token)
+        body = json.dumps({"user": user}, ensure_ascii=False).encode("utf-8")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_admin_create_user(self, admin: dict) -> None:
+        try:
+            payload = self._read_json()
+            password = str(payload.get("password") or "").strip() or self._temporary_password()
+            user = DATA_STORE.create_local_user(
+                str(payload.get("email") or ""),
+                password,
+                str(payload.get("display_name") or ""),
+                role="admin" if payload.get("role") == "admin" else "user",
+            )
+            DATA_STORE.audit(admin["id"], "user.admin_created", "user", user["id"], {"role": user.get("role", "user")})
+            self._send_json({"user": user, "temporary_password": password}, HTTPStatus.CREATED)
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    @staticmethod
+    def _temporary_password() -> str:
+        return secrets.token_urlsafe(12)
+
+    def _handle_create_search_evaluation(self, admin: dict) -> None:
+        if not self._paper_search_enabled():
+            self._send_json({"error": "Academic search is not enabled. Set PAPER_SEARCH_ENABLED=true."}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        try:
+            payload = self._read_json()
+            queries = self._evaluation_queries_from_payload(payload)
+            if not queries:
+                self._send_json({"error": "请至少输入一个评估题目。"}, HTTPStatus.BAD_REQUEST)
+                return
+            request = {
+                "name": str(payload.get("name") or "").strip() or f"Search evaluation {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed").strip(),
+                "search_mode": str(payload.get("search_mode") or "auto").strip().lower() or "auto",
+                "year": str(payload.get("year") or "").strip(),
+                "max_results_per_source": self._bounded_int(payload.get("max_results_per_source"), default=5, minimum=1, maximum=50),
+                "include_needs_review": self._truthy(payload.get("include_needs_review", True)),
+                "append_annotation_record": False,
+                "timeout_seconds": self._bounded_int(os.getenv("PAPER_SEARCH_TIMEOUT_SECONDS"), default=45, minimum=1, maximum=180),
+                "concurrency": self._bounded_int(payload.get("concurrency"), default=3, minimum=1, maximum=8),
+            }
+            run_id = DATA_STORE.create_evaluation_run(admin["id"], request["name"], "literature_search", request, queries)
+            thread = threading.Thread(target=_run_search_evaluation, args=(run_id, admin["id"]), daemon=True, name=f"eval-{run_id[:8]}")
+            EVALUATION_THREADS[run_id] = thread
+            thread.start()
+            self._send_json({"run_id": run_id, "status": "queued"}, HTTPStatus.ACCEPTED)
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    @staticmethod
+    def _evaluation_queries_from_payload(payload: dict) -> list[str]:
+        raw_queries = payload.get("queries")
+        if isinstance(raw_queries, list):
+            values = raw_queries
+        else:
+            values = str(payload.get("query_text") or "").splitlines()
+        queries = []
+        seen = set()
+        for value in values:
+            query = re.sub(r"\s+", " ", str(value or "")).strip()
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            queries.append(query[:800])
+        return queries[:200]
+
+    def _send_evaluation_csv(self, owner: str, run_id: str) -> None:
+        detail = DATA_STORE.evaluation_run_detail(owner, run_id)
+        if not detail:
+            self._send_json({"error": "Evaluation run not found."}, HTTPStatus.NOT_FOUND)
+            return
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["query", "status", "total_ms", "planning_ms", "recall_ms", "canonical_repair_ms", "screening_ms", "verification_ms", "qualified", "needs_review", "rejected", "raw_count", "errors"])
+        for item in detail.get("items", []):
+            result = item.get("result") or {}
+            timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+            writer.writerow([
+                item.get("query", ""),
+                item.get("status", ""),
+                item.get("total_duration_ms") or "",
+                seconds_to_ms(timings.get("planning_seconds")),
+                seconds_to_ms(timings.get("recall_seconds")),
+                seconds_to_ms(timings.get("canonical_repair_seconds")),
+                seconds_to_ms(timings.get("screening_seconds")),
+                seconds_to_ms(timings.get("verification_seconds")),
+                len(result.get("qualified_references") or []),
+                len(result.get("needs_review_references") or []),
+                result.get("rejected_count") or 0,
+                result.get("raw_count") or 0,
+                json.dumps(result.get("errors") or {}, ensure_ascii=False) if not item.get("error") else item.get("error"),
+            ])
+        body = output.getvalue().encode("utf-8-sig")
+        filename = re.sub(r"[^a-zA-Z0-9_.-]+", "_", detail.get("name") or "search_evaluation").strip("_") or "search_evaluation"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}.csv"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _begin_oidc_login(self) -> None:
         if not OIDC.enabled:
@@ -1977,7 +2343,8 @@ Rules:
             self._clear_session_on_response = False
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
-            self.send_header("Set-Cookie", "research_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+            secure = "; Secure" if truthy(os.getenv("SESSION_COOKIE_SECURE", "true")) else ""
+            self.send_header("Set-Cookie", f"research_session=; Path=/; Max-Age=0; HttpOnly{secure}; SameSite=Lax")
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

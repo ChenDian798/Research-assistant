@@ -34,6 +34,8 @@ OPENAI_MODEL=your_model
 OPENAI_BASE_URL=https://your-compatible-endpoint/v1
 WEB_HOST=0.0.0.0
 RESEARCH_AGENT_CONTACT_EMAIL=admin@example.com
+ALLOW_SELF_REGISTRATION=true
+SESSION_TTL_SECONDS=28800
 ```
 
 启动 Web 服务：
@@ -46,6 +48,29 @@ python web_app.py 8000
 
 ```text
 http://127.0.0.1:8000
+```
+
+## 用户登录和管理员
+
+当前 Web 应用内置轻量账号系统：普通用户可在页面内注册/登录，登录后的历史记录、任务和上传文件会按用户隔离保存。
+
+创建第一个管理员账号：
+
+```powershell
+python scripts/create_admin.py admin@example.com
+```
+
+脚本会在终端安全提示输入密码。管理员登录后，顶部导航会显示“管理”，可查看用户列表、启用/禁用账号、调整管理员权限或删除用户数据。
+
+管理员还可以进入“评估”页面批量运行检索题目。该页面支持一次输入多行题目、设置来源/模式/并发数，并会记录每条题目的总耗时、规划、召回、元数据修复、筛选、验证等阶段耗时，以及合格/待复核/过滤/原始候选数量。评估结果可导出 CSV，用于后续性能和检索质量优化。
+
+可选配置：
+
+```text
+ALLOW_SELF_REGISTRATION=true
+SESSION_TTL_SECONDS=28800
+# Set false only for local HTTP testing. Keep true behind HTTPS in production.
+SESSION_COOKIE_SECURE=true
 ```
 
 ## Web 模块
@@ -102,13 +127,13 @@ src/research_agent/citations.py    APA / IEEE / BibTeX 引用格式化
 src/research_agent/doi.py          DOI、arXiv、PMID、网页元数据补全
 src/research_agent/pubmed_search.py
                                    PMID 元数据获取
-tests/                             文献分析和 Web 层回归测试
+non_runtime/                       示例、测试题集、交接材料和回归测试
 ```
 
 ## 测试
 
 ```powershell
-python -m pytest -q
+python -m pytest non_runtime/tests -q
 ```
 
 当前测试覆盖：
