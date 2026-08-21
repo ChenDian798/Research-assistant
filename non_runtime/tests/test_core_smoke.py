@@ -240,19 +240,9 @@ def test_doi_enrichment_falls_back_to_openalex_abstract(monkeypatch) -> None:
 
 def test_literature_analysis_handler_passes_requested_output_language(monkeypatch) -> None:
     sent = {}
-    thread_args = {}
     history_request = {}
     handler = object.__new__(ResearchWebHandler)
     handler.server = type("FakeServer", (), {"server_port": 8125})()
-
-    class FakeThread:
-        def __init__(self, *, target, args, daemon) -> None:
-            thread_args["target"] = target
-            thread_args["args"] = args
-            thread_args["daemon"] = daemon
-
-        def start(self) -> None:
-            thread_args["started"] = True
 
     monkeypatch.setattr(
         handler,
@@ -271,13 +261,17 @@ def test_literature_analysis_handler_passes_requested_output_language(monkeypatc
         return "history-language-1"
 
     monkeypatch.setattr(handler, "_create_history_entry", fake_create_history_entry)
-    monkeypatch.setattr(web_app.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        handler,
+        "_create_durable_job",
+        lambda kind, request: ({"id": "analysis-language-job"}, True),
+    )
+    monkeypatch.setattr(handler, "_enqueue_durable_job", lambda job_id: "celery-task-1")
 
     handler._handle_literature_analysis()
 
     assert sent["status"] == 202
-    assert thread_args["started"] is True
-    assert thread_args["args"][-1] == "en"
+    assert web_app.JOBS["analysis-language-job"]["request"]["output_language"] == "en"
     assert history_request["output_language"] == "en"
 
 
@@ -3855,6 +3849,13 @@ def test_async_literature_search_returns_history_task(monkeypatch) -> None:
     )
     monkeypatch.setattr(handler, "_send_json", lambda payload, status=200: sent.update(payload=payload, status=status))
     monkeypatch.setattr(
+        handler,
+        "_create_durable_job",
+        lambda kind, request: ({"id": "search-job-1"}, True),
+    )
+    monkeypatch.setattr(handler, "_create_history_entry", lambda **kwargs: "history-search-1")
+    monkeypatch.setattr(handler, "_enqueue_durable_job", lambda job_id: "celery-task-1")
+    monkeypatch.setattr(
         web_app,
         "search_papers",
         lambda *args, **kwargs: {
@@ -3892,23 +3893,25 @@ def test_async_literature_search_returns_history_task(monkeypatch) -> None:
 
     assert sent["status"] == 202
     assert sent["payload"]["status"] == "queued"
-    history_id = sent["payload"]["history_id"]
-    entry = ResearchWebHandler._history_entry(history_id)
-    assert entry["status"] in {"queued", "running", "done"}
+    assert sent["payload"]["history_id"] == "history-search-1"
     job = web_app.JOBS[sent["payload"]["job_id"]]
     assert job["kind"] == "literature_search"
 
 
-def test_literature_search_job_endpoint_returns_job() -> None:
+def test_literature_search_job_endpoint_returns_job(monkeypatch) -> None:
     sent = {}
     job_id = "search-job-1"
-    web_app.JOBS.clear()
-    web_app.JOBS[job_id] = {
-        "status": "running",
-        "kind": "literature_search",
-        "stage": "Searching literature...",
-        "owner_user_id": "test-user",
-    }
+    monkeypatch.setattr(
+        web_app.DATA_STORE,
+        "job",
+        lambda owner, requested_job_id: {
+            "id": requested_job_id,
+            "status": "running",
+            "kind": "literature_search",
+            "stage": "Searching literature...",
+            "owner_user_id": owner,
+        },
+    )
     handler = object.__new__(ResearchWebHandler)
     handler.path = f"/api/literature-search/{job_id}"
     handler._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)

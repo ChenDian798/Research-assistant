@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import io
 import json
 import sys
@@ -26,12 +27,15 @@ def _clean_pdf_metadata(metadata) -> dict:
 
 def _extract_with_pymupdf(content: bytes, *, page_limit: int | None, max_text_chars: int) -> dict | None:
     try:
-        import fitz
+        import pymupdf
     except ImportError:
-        return None
+        try:
+            import fitz as pymupdf
+        except ImportError:
+            return None
 
     try:
-        document = fitz.open(stream=content, filetype="pdf")
+        document = pymupdf.open(stream=content, filetype="pdf")
     except Exception:
         return None
 
@@ -140,12 +144,16 @@ def main() -> int:
 
     page_limit = None if str(args.page_limit).casefold() in {"all", "none", "unlimited", "0"} else max(1, int(args.page_limit))
     try:
-        result = extract_pdf(
-            Path(args.input).read_bytes(),
-            page_limit=page_limit,
-            max_page_count=max(0, int(args.max_page_count)),
-            max_text_chars=max(1000, int(args.max_text_chars)),
-        )
+        # Third-party PDF libraries occasionally print warnings to stdout.
+        # Keep stdout machine-readable because the parent process expects one
+        # JSON document; diagnostic output belongs on stderr.
+        with redirect_stdout(sys.stderr):
+            result = extract_pdf(
+                Path(args.input).read_bytes(),
+                page_limit=page_limit,
+                max_page_count=max(0, int(args.max_page_count)),
+                max_text_chars=max(1000, int(args.max_text_chars)),
+            )
     except Exception as error:
         print(json.dumps({"error": f"{type(error).__name__}: {error}"}, ensure_ascii=False))
         return 1

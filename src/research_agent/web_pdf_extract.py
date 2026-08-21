@@ -430,12 +430,15 @@ def _extract_pdf_content_with_pymupdf(
     clean_pdf_page_text: Callable[[str], str],
 ) -> dict | None:
     try:
-        import fitz
+        import pymupdf
     except ImportError:
-        return None
+        try:
+            import fitz as pymupdf
+        except ImportError:
+            return None
 
     try:
-        document = fitz.open(stream=content, filetype="pdf")
+        document = pymupdf.open(stream=content, filetype="pdf")
     except Exception as error:
         print(
             f"[web] PyMuPDF fallback PDF extraction failed to open document: "
