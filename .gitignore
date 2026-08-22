@@ -34,6 +34,7 @@ pnpm-debug.log*
 # Runtime data and generated outputs
 data/
 user_data/
+/annotation_records/
 logs/
 tmp/
 outputs/
