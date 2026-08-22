@@ -75,6 +75,43 @@ export async function fetchAdminUsers() {
   return Array.isArray(payload.users) ? payload.users : [];
 }
 
+export async function fetchAdminHistory({ limit = 100, ownerUserId = "", ownerKeyword = "", kind = "", status = "" } = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit || 100));
+  if (ownerUserId) params.set("owner_user_id", ownerUserId);
+  if (ownerKeyword) params.set("owner_keyword", ownerKeyword);
+  if (kind) params.set("kind", kind);
+  if (status) params.set("status", status);
+  const response = await apiFetch(`/api/admin/history?${params.toString()}`, { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return Array.isArray(payload.history) ? payload.history : [];
+}
+
+export async function fetchAdminHistoryDetail(historyId) {
+  const response = await apiFetch(`/api/admin/history/${encodeURIComponent(historyId)}`, { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+export async function fetchAdminMetrics(days = 7) {
+  const params = new URLSearchParams({ days: String(days || 7) });
+  const response = await apiFetch(`/api/admin/metrics?${params.toString()}`, { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+export async function fetchAdminAuditLogs(limit = 30, actorUserId = "") {
+  const params = new URLSearchParams({ limit: String(limit || 30) });
+  if (actorUserId) params.set("actor_user_id", actorUserId);
+  const response = await apiFetch(`/api/admin/audit-logs?${params.toString()}`, { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return Array.isArray(payload.audit_logs) ? payload.audit_logs : [];
+}
+
 export async function createAdminUser({ email, displayName = "", password = "", role = "user" }) {
   const response = await apiFetch("/api/admin/users", {
     method: "POST",

@@ -352,14 +352,15 @@ class SearchRouteService:
 
     def _search_request_from_payload(self, payload: dict) -> dict:
         handler = self.handler
+        per_source_cap = handler._search_result_cap()
         return {
             "query": str(payload.get("query", "") or "").strip(),
             "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed,semantic").strip(),
             "max_results_per_source": handler._bounded_int(
                 payload.get("max_results_per_source"),
-                default=handler._bounded_int(os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"), default=5, minimum=1, maximum=50),
+                default=handler._bounded_int(os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"), default=5, minimum=1, maximum=per_source_cap),
                 minimum=1,
-                maximum=50,
+                maximum=per_source_cap,
             ),
             "timeout_seconds": handler._bounded_int(
                 os.getenv("PAPER_SEARCH_TIMEOUT_SECONDS"),
@@ -599,6 +600,7 @@ class SearchRouteService:
 
     def _novelty_request_from_payload(self, payload: dict) -> dict:
         handler = self.handler
+        per_source_cap = handler._search_result_cap()
         return {
             "innovation_text": str(payload.get("innovation_text") or payload.get("query") or "").strip(),
             "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed,semantic").strip(),
@@ -606,9 +608,9 @@ class SearchRouteService:
             "year": str(payload.get("year") or "").strip(),
             "max_results_per_source": handler._bounded_int(
                 payload.get("max_results_per_source"),
-                default=handler._bounded_int(os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"), default=5, minimum=1, maximum=50),
+                default=handler._bounded_int(os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"), default=5, minimum=1, maximum=per_source_cap),
                 minimum=1,
-                maximum=50,
+                maximum=per_source_cap,
             ),
             "timeout_seconds": handler._bounded_int(
                 os.getenv("PAPER_SEARCH_TIMEOUT_SECONDS"),

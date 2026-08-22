@@ -118,7 +118,7 @@ HISTORY_LOCK = ProcessFileLock(HISTORY_LOCK_PATH)
 DATA_STORE = UserDataStore(RUNTIME_DIR)
 configure_store(DATA_STORE)
 DATA_STORE.migrate_legacy_history(HISTORY_PATH)
-DATA_STORE.enforce_retention(int(os.getenv("DATA_RETENTION_DAYS", "90")))
+DATA_STORE.enforce_retention(int(os.getenv("DATA_RETENTION_DAYS", "30")))
 OIDC = OIDCClient()
 OIDC_STATES: dict[str, tuple[str, float]] = {}
 EVALUATION_THREADS: dict[str, threading.Thread] = {}
@@ -138,6 +138,7 @@ class BackgroundJobHandler:
     _normalize_output_language = staticmethod(normalize_output_language)
     _paper_search_enabled = staticmethod(lambda: truthy(os.getenv("PAPER_SEARCH_ENABLED", "false")))
     _bounded_int = staticmethod(bounded_int)
+    _search_result_cap = staticmethod(lambda: bounded_int(os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE_CAP") or os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"), default=5, minimum=1, maximum=50))
 
 
 def execute_persisted_job(job_id: str, *, task_id: str = "", attempt: int = 0) -> None:
@@ -384,6 +385,61 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"users": DATA_STORE.list_users()})
             return
+        if path == "/api/admin/history":
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            query = parse_qs(urlparse(self.path).query)
+            limit = bounded_int(query.get("limit", ["100"])[0], default=100, minimum=1, maximum=300)
+            self._send_json(
+                {
+                    "history": DATA_STORE.admin_histories(
+                        limit=limit,
+                        owner_user_id=query.get("owner_user_id", [""])[0],
+                        owner_keyword=query.get("owner_keyword", [""])[0],
+                        kind=query.get("kind", [""])[0],
+                        status=query.get("status", [""])[0],
+                    )
+                }
+            )
+            return
+        if path.startswith("/api/admin/history/"):
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            history_id = path.removeprefix("/api/admin/history/").strip()
+            detail = DATA_STORE.admin_history_detail(history_id)
+            if not detail:
+                self._send_json({"error": "History entry not found."}, HTTPStatus.NOT_FOUND)
+                return
+            DATA_STORE.audit(
+                admin["id"],
+                "history.admin_viewed",
+                "history",
+                str(detail.get("id") or history_id),
+                {"owner_user_id": detail.get("owner_user_id", "")},
+            )
+            self._send_json(detail)
+            return
+        if path == "/api/admin/metrics":
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            query = parse_qs(urlparse(self.path).query)
+            days = bounded_int(query.get("days", ["7"])[0], default=7, minimum=1, maximum=30)
+            if days not in {1, 7, 30}:
+                days = 7
+            self._send_json(DATA_STORE.admin_light_metrics(days=days))
+            return
+        if path == "/api/admin/audit-logs":
+            admin = self._require_admin_user()
+            if not admin:
+                return
+            query = parse_qs(urlparse(self.path).query)
+            limit = bounded_int(query.get("limit", ["30"])[0], default=30, minimum=1, maximum=100)
+            actor_user_id = (query.get("actor_user_id", [""])[0] or "").strip()
+            self._send_json({"audit_logs": DATA_STORE.admin_recent_audit_logs(limit=limit, actor_user_id=actor_user_id)})
+            return
         if path == "/api/admin/evaluations":
             admin = self._require_admin_user()
             if not admin:
@@ -535,6 +591,7 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
                 return
             try:
                 DATA_STORE.delete_user(user_id)
+                DATA_STORE.audit(admin["id"], "user.deleted", "user", user_id, {"source": "admin"})
             except Exception as error:
                 self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 return
@@ -727,7 +784,7 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
                 "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed").strip(),
                 "search_mode": str(payload.get("search_mode") or "auto").strip().lower() or "auto",
                 "year": str(payload.get("year") or "").strip(),
-                "max_results_per_source": self._bounded_int(payload.get("max_results_per_source"), default=5, minimum=1, maximum=50),
+                "max_results_per_source": self._bounded_int(payload.get("max_results_per_source"), default=5, minimum=1, maximum=self._search_result_cap()),
                 "include_needs_review": self._truthy(payload.get("include_needs_review", True)),
                 "append_annotation_record": False,
                 "timeout_seconds": self._bounded_int(os.getenv("PAPER_SEARCH_TIMEOUT_SECONDS"), default=45, minimum=1, maximum=180),
@@ -922,7 +979,7 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
             filename = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "_", title).strip("_")[:80] or "research_report"
             owner = CURRENT_USER_ID.get()
             if owner:
-                DATA_STORE.store_file(owner, "exports", f"{filename}.pdf", pdf, int(os.getenv("EXPORT_RETENTION_DAYS", "30")))
+                DATA_STORE.store_file(owner, "exports", f"{filename}.pdf", pdf, int(os.getenv("EXPORT_RETENTION_DAYS", "7")))
             send_binary(
                 self,
                 pdf,
@@ -1446,6 +1503,15 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
         return max(0.0, min(parsed, 1.0))
 
     @staticmethod
+    def _search_result_cap() -> int:
+        return ResearchWebHandler._bounded_int(
+            os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE_CAP") or os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"),
+            default=5,
+            minimum=1,
+            maximum=50,
+        )
+
+    @staticmethod
     def _normalize_extracted_text(value: str) -> str:
         return normalize_extracted_text(value)
 
@@ -1537,7 +1603,7 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
         owner = owner if DATA_STORE.user_exists(owner) else None
         if owner:
             for filename, content in files:
-                DATA_STORE.store_file(owner, "uploads", filename, content, int(os.getenv("UPLOAD_RETENTION_DAYS", "30")))
+                DATA_STORE.store_file(owner, "uploads", filename, content, int(os.getenv("UPLOAD_RETENTION_DAYS", "14")))
         return files, references, fields
 
     @staticmethod

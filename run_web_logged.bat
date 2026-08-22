@@ -18,4 +18,9 @@ echo Research Agent Web will write stderr to:
 echo   "%ERR_LOG%"
 echo.
 
-python web_app.py %PORT% 1>>"%OUT_LOG%" 2>>"%ERR_LOG%"
+set "CODEX_PYTHON=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if exist "%CODEX_PYTHON%" (
+  "%CODEX_PYTHON%" web_app.py %PORT% 1>>"%OUT_LOG%" 2>>"%ERR_LOG%"
+) else (
+  python web_app.py %PORT% 1>>"%OUT_LOG%" 2>>"%ERR_LOG%"
+)

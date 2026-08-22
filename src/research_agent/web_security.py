@@ -318,6 +318,38 @@ class UserDataStore:
             self._execute(connection, "INSERT INTO audit_logs (id, actor_user_id, action, resource_type, resource_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (uuid.uuid4().hex, actor, action, resource_type, resource_id, json.dumps(detail or {}, ensure_ascii=False), utc_now()))
             connection.commit()
 
+    def admin_recent_audit_logs(self, limit: int = 30, actor_user_id: str = "") -> list[dict]:
+        limit = max(1, min(int(limit or 30), 100))
+        where = ""
+        params: list[object] = []
+        if actor_user_id:
+            where = "WHERE a.actor_user_id = ?"
+            params.append(actor_user_id)
+        params.append(limit)
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                f"""
+                SELECT
+                    a.actor_user_id, u.email AS actor_email, u.display_name AS actor_display_name,
+                    a.action, a.resource_type, a.resource_id, a.detail, a.created_at
+                FROM audit_logs a
+                LEFT JOIN users u ON u.id = a.actor_user_id
+                {where}
+                ORDER BY a.created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+            rows = cursor.fetchall()
+            columns = [item[0] for item in cursor.description]
+        logs = []
+        for row in rows:
+            item = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))
+            item["detail"] = decode_json_value(item.get("detail"), {})
+            logs.append(item)
+        return logs
+
     def provision_user(self, subject: str, email: str = "", display_name: str = "") -> dict:
         existing = self._fetchone("SELECT * FROM users WHERE oidc_subject = ? AND deleted_at IS NULL", (subject,))
         if existing:
@@ -430,6 +462,326 @@ class UserDataStore:
         with self._connect() as connection:
             rows = self._execute(connection, "SELECT payload FROM history_entries WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT ?", (owner, limit)).fetchall()
             return [decode_json_value(row[0], {}) for row in rows]
+
+    def admin_histories(
+        self,
+        limit: int = 100,
+        owner_user_id: str = "",
+        owner_keyword: str = "",
+        kind: str = "",
+        status: str = "",
+    ) -> list[dict]:
+        limit = max(1, min(int(limit or 100), 300))
+        conditions = ["u.deleted_at IS NULL"]
+        params: list[object] = []
+        owner_user_id = str(owner_user_id or "").strip()
+        owner_keyword = str(owner_keyword or "").strip().casefold()
+        kind = str(kind or "").strip()
+        status = str(status or "").strip()
+        if owner_user_id:
+            conditions.append("h.owner_user_id = ?")
+            params.append(owner_user_id)
+        if owner_keyword:
+            conditions.append("(LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.display_name, '')) LIKE ? OR LOWER(h.owner_user_id) LIKE ?)")
+            keyword = f"%{owner_keyword}%"
+            params.extend([keyword, keyword, keyword])
+        if kind:
+            conditions.append("h.kind = ?")
+            params.append(kind)
+        if status:
+            conditions.append("h.status = ?")
+            params.append(status)
+        params.append(limit)
+        sql = f"""
+            SELECT
+                h.id, h.owner_user_id, u.email AS owner_email, u.display_name AS owner_display_name,
+                h.kind, h.status, h.title, h.job_id, h.payload, h.created_at, h.updated_at
+            FROM history_entries h
+            JOIN users u ON u.id = h.owner_user_id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY h.updated_at DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            cursor = self._execute(connection, sql, tuple(params))
+            rows = cursor.fetchall()
+            columns = [item[0] for item in cursor.description]
+        return [self._admin_history_summary(dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))) for row in rows]
+
+    def admin_history_detail(self, history_id: str) -> dict | None:
+        row = self._fetchone(
+            """
+            SELECT
+                h.id, h.owner_user_id, u.email AS owner_email, u.display_name AS owner_display_name,
+                h.kind, h.status, h.title, h.job_id, h.payload, h.created_at, h.updated_at
+            FROM history_entries h
+            JOIN users u ON u.id = h.owner_user_id
+            WHERE h.id=? AND u.deleted_at IS NULL
+            """,
+            (str(history_id or "").strip(),),
+        )
+        if not row:
+            return None
+        detail = decode_json_value(row.get("payload"), {})
+        if not isinstance(detail, dict):
+            detail = {}
+        result = {
+            **detail,
+            "id": row.get("id", detail.get("id", "")),
+            "owner_user_id": row.get("owner_user_id", detail.get("owner_user_id", "")),
+            "owner_email": row.get("owner_email", ""),
+            "owner_display_name": row.get("owner_display_name", ""),
+            "kind": row.get("kind", detail.get("kind", "")),
+            "status": row.get("status", detail.get("status", "")),
+            "title": row.get("title", detail.get("title", "")),
+            "job_id": row.get("job_id", detail.get("job_id", "")),
+            "created_at": row.get("created_at", detail.get("created_at", "")),
+            "updated_at": row.get("updated_at", detail.get("updated_at", "")),
+        }
+        job_id = str(result.get("job_id") or "").strip()
+        job = self.job_by_id(job_id) if job_id else None
+        result["admin_summary"] = self._admin_history_observability_summary(result, job or {})
+        return result
+
+    @staticmethod
+    def _admin_history_summary(row: dict) -> dict:
+        payload = decode_json_value(row.get("payload"), {})
+        payload = payload if isinstance(payload, dict) else {}
+        request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+        request_keys = {"query", "topic", "sources", "search_mode", "year", "reference_count", "file_count"}
+        return {
+            "id": row.get("id", ""),
+            "owner_user_id": row.get("owner_user_id", ""),
+            "owner_email": row.get("owner_email", ""),
+            "owner_display_name": row.get("owner_display_name", ""),
+            "kind": row.get("kind") or payload.get("kind", ""),
+            "status": row.get("status") or payload.get("status", ""),
+            "title": row.get("title") or payload.get("title", ""),
+            "job_id": row.get("job_id") or payload.get("job_id", ""),
+            "counts": payload.get("counts") if isinstance(payload.get("counts"), dict) else {},
+            "created_at": row.get("created_at") or payload.get("created_at", ""),
+            "updated_at": row.get("updated_at") or payload.get("updated_at", ""),
+            "request": {key: request.get(key) for key in request_keys if key in request},
+        }
+
+    @staticmethod
+    def _admin_history_observability_summary(detail: dict, job: dict) -> dict:
+        result = detail.get("result") if isinstance(detail.get("result"), dict) else {}
+        counts = detail.get("counts") if isinstance(detail.get("counts"), dict) else {}
+        timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+        source_results = result.get("source_results") if isinstance(result.get("source_results"), dict) else {}
+        if not source_results and isinstance(result.get("internal_source_results"), dict):
+            source_results = result.get("internal_source_results")
+        diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+        error = str(detail.get("error") or job.get("error") or result.get("error") or "")
+        errors = []
+        if error:
+            errors.append(error)
+        result_errors = result.get("errors")
+        if isinstance(result_errors, dict):
+            errors.extend(f"{key}: {value}" for key, value in result_errors.items() if value)
+        elif isinstance(result_errors, list):
+            errors.extend(str(item) for item in result_errors if item)
+        warnings = diagnostics.get("warnings") if isinstance(diagnostics.get("warnings"), list) else []
+        created_at = str(detail.get("created_at") or "")
+        updated_at = str(detail.get("updated_at") or "")
+        job_created_at = str(job.get("created_at") or "")
+        started_at = str(job.get("started_at") or "")
+        finished_at = str(job.get("finished_at") or "")
+        return {
+            "status": detail.get("status") or job.get("status") or "",
+            "stage": detail.get("stage") or job.get("stage") or "",
+            "history_created_at": created_at,
+            "history_updated_at": updated_at,
+            "job_created_at": job_created_at,
+            "job_started_at": started_at,
+            "job_finished_at": finished_at,
+            "history_elapsed_seconds": UserDataStore._seconds_between(created_at, updated_at),
+            "queue_seconds": UserDataStore._seconds_between(job_created_at, started_at),
+            "run_seconds": UserDataStore._seconds_between(started_at or job_created_at, finished_at or updated_at),
+            "total_seconds": UserDataStore._seconds_between(job_created_at or created_at, finished_at or updated_at),
+            "counts": counts,
+            "timings": timings,
+            "source_results": source_results,
+            "warnings": [str(item) for item in warnings[:8]],
+            "errors": errors[:8],
+        }
+
+    @staticmethod
+    def _seconds_between(start: str, end: str) -> float | None:
+        if not start or not end:
+            return None
+        try:
+            start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return max(0.0, round((end_dt - start_dt).total_seconds(), 3))
+
+    def admin_light_metrics(self, days: int = 7) -> dict:
+        days = int(days or 7)
+        if days not in {1, 7, 30}:
+            days = 7
+        cutoff = datetime.fromtimestamp(time.time() - days * 86400, timezone.utc).isoformat(timespec="seconds")
+        metrics = {
+            "range_days": days,
+            "users": {"total": 0, "active": 0, "disabled": 0},
+            "usage": {
+                "history_total": 0,
+                "literature_search": 0,
+                "novelty_check": 0,
+                "direct_analysis": 0,
+                "search_analysis": 0,
+            },
+            "jobs": {"queued": 0, "running": 0, "done": 0, "error": 0},
+            "quality": {
+                "candidate_total": 0,
+                "qualified_total": 0,
+                "needs_review_total": 0,
+                "rejected_total": 0,
+            },
+            "storage": {"file_count": 0},
+            "users_usage": [],
+            "recent_errors": [],
+        }
+        with self._connect() as connection:
+            user_rows = self._execute(
+                connection,
+                "SELECT status, COUNT(*) AS count FROM users WHERE deleted_at IS NULL GROUP BY status",
+            ).fetchall()
+            for row in user_rows:
+                status, count = str(row[0] or "active"), int(row[1] or 0)
+                metrics["users"]["total"] += count
+                if status == "disabled":
+                    metrics["users"]["disabled"] += count
+                else:
+                    metrics["users"]["active"] += count
+
+            history_rows = self._execute(
+                connection,
+                """
+                SELECT h.owner_user_id, u.email, u.display_name, h.id, h.kind, h.status, h.title, h.payload, h.updated_at
+                FROM history_entries h
+                JOIN users u ON u.id = h.owner_user_id
+                WHERE u.deleted_at IS NULL AND h.updated_at >= ?
+                ORDER BY h.updated_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+            job_rows = self._execute(
+                connection,
+                """
+                SELECT j.owner_user_id, u.email, u.display_name, j.status, j.updated_at
+                FROM jobs j
+                JOIN users u ON u.id = j.owner_user_id
+                WHERE u.deleted_at IS NULL AND j.updated_at >= ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            file_rows = self._execute(
+                connection,
+                """
+                SELECT f.owner_user_id, u.email, u.display_name, f.created_at
+                FROM files f
+                JOIN users u ON u.id = f.owner_user_id
+                WHERE u.deleted_at IS NULL AND f.created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchall()
+
+        users_usage: dict[str, dict] = {}
+
+        def user_usage(owner_user_id: str, email: str = "", display_name: str = "") -> dict:
+            owner_user_id = str(owner_user_id or "")
+            item = users_usage.setdefault(
+                owner_user_id,
+                {
+                    "owner_user_id": owner_user_id,
+                    "email": email or "",
+                    "display_name": display_name or "",
+                    "history_total": 0,
+                    "job_done": 0,
+                    "job_error": 0,
+                    "file_count": 0,
+                    "last_activity_at": "",
+                },
+            )
+            if email and not item.get("email"):
+                item["email"] = email
+            if display_name and not item.get("display_name"):
+                item["display_name"] = display_name
+            return item
+
+        for row in history_rows:
+            owner_user_id, email, display_name = str(row[0] or ""), str(row[1] or ""), str(row[2] or "")
+            history_id, kind, status, title, payload, updated_at = row[3], str(row[4] or ""), str(row[5] or ""), str(row[6] or ""), row[7], str(row[8] or "")
+            metrics["usage"]["history_total"] += 1
+            if kind in metrics["usage"]:
+                metrics["usage"][kind] += 1
+            usage = user_usage(owner_user_id, email, display_name)
+            usage["history_total"] += 1
+            usage["last_activity_at"] = max(str(usage.get("last_activity_at") or ""), updated_at)
+            history_payload = decode_json_value(payload, {})
+            counts = history_payload.get("counts") if isinstance(history_payload, dict) and isinstance(history_payload.get("counts"), dict) else {}
+            metrics["quality"]["candidate_total"] += self._first_int(counts, "candidates", "candidate_count", "raw", "raw_count", "references")
+            metrics["quality"]["qualified_total"] += self._first_int(counts, "qualified", "qualified_count")
+            metrics["quality"]["needs_review_total"] += self._first_int(counts, "needs_review", "needs_review_count")
+            metrics["quality"]["rejected_total"] += self._first_int(counts, "rejected", "rejected_count", "filtered", "filtered_count")
+            error = ""
+            if status == "error" and isinstance(history_payload, dict):
+                error = str(history_payload.get("error") or history_payload.get("stage") or "History failed.")
+            if error and len(metrics["recent_errors"]) < 10:
+                metrics["recent_errors"].append(
+                    {
+                        "history_id": history_id,
+                        "owner_user_id": owner_user_id,
+                        "user": email or display_name or owner_user_id,
+                        "kind": kind,
+                        "title": title,
+                        "error": error,
+                        "updated_at": updated_at,
+                    }
+                )
+
+        for row in job_rows:
+            owner_user_id, email, display_name = str(row[0] or ""), str(row[1] or ""), str(row[2] or "")
+            status, updated_at = str(row[3] or ""), str(row[4] or "")
+            if status in metrics["jobs"]:
+                metrics["jobs"][status] += 1
+            elif status in {"failed", "cancelled"}:
+                metrics["jobs"]["error"] += 1
+            usage = user_usage(owner_user_id, email, display_name)
+            if status == "done":
+                usage["job_done"] += 1
+            elif status in {"error", "failed", "cancelled"}:
+                usage["job_error"] += 1
+            usage["last_activity_at"] = max(str(usage.get("last_activity_at") or ""), updated_at)
+
+        for row in file_rows:
+            owner_user_id, email, display_name = str(row[0] or ""), str(row[1] or ""), str(row[2] or "")
+            created_at = str(row[3] or "")
+            metrics["storage"]["file_count"] += 1
+            usage = user_usage(owner_user_id, email, display_name)
+            usage["file_count"] += 1
+            usage["last_activity_at"] = max(str(usage.get("last_activity_at") or ""), created_at)
+
+        metrics["users_usage"] = sorted(
+            users_usage.values(),
+            key=lambda item: (str(item.get("last_activity_at") or ""), int(item.get("history_total") or 0)),
+            reverse=True,
+        )
+        return metrics
+
+    @staticmethod
+    def _first_int(source: dict, *keys: str) -> int:
+        for key in keys:
+            try:
+                value = int(source.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value:
+                return value
+        return 0
 
     def update_history_internal(self, history_id: str, mutate) -> bool:
         with self._connect() as connection:

@@ -59,6 +59,10 @@ MAX_UPLOAD_TOTAL_MB=30
 3. Set upload safety variables in `.env`:
 
    ```env
+   DATA_RETENTION_DAYS=30
+   JOB_RETENTION_DAYS=30
+   UPLOAD_RETENTION_DAYS=14
+   EXPORT_RETENTION_DAYS=7
    MAX_UPLOAD_TOTAL_MB=30
    MAX_UPLOAD_FILE_MB=15
    MAX_UPLOAD_FILES=4
@@ -74,7 +78,16 @@ MAX_UPLOAD_TOTAL_MB=30
    CLAMAV_HOST=127.0.0.1
    CLAMAV_PORT=3310
    CLAMAV_TIMEOUT_SECONDS=10
+   PAPER_SEARCH_MAX_RESULTS_PER_SOURCE=5
+   PAPER_SEARCH_MAX_RESULTS_PER_SOURCE_CAP=5
+   PAPER_SEARCH_MAX_TOTAL=40
    ```
+
+   These are intentionally global beta safeguards rather than a per-user quota
+   system: history/jobs are retained for 30 days, uploaded source files for 14
+   days, exported PDFs for 7 days, uploads are capped at 30 MB total / 15 MB per
+   file / 4 files per request, and each academic source returns at most 5
+   candidates per search request by default.
 
 4. Install the Web and Celery systemd units and their shared security settings:
 
