@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createSearchEvaluation, evaluationExportUrl, fetchEvaluationDetail, fetchEvaluations } from "../lib/api.js";
 
-const sourceOptions = ["arxiv", "pubmed", "semantic", "openalex", "crossref"];
+const sourceOptions = ["arxiv", "pubmed", "openalex", "crossref"];
 
 export default function EvaluationView({ t }) {
   const [form, setForm] = useState({

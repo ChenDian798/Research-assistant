@@ -5,10 +5,8 @@ import ReferenceLink from "../components/ReferenceLink.jsx";
 const sourceOptions = [
   ["arxiv", "arXiv"],
   ["pubmed", "PubMed"],
-  ["semantic", "Semantic Scholar"],
   ["crossref", "Crossref"],
   ["openalex", "OpenAlex"],
-  ["cnki", "search.cnki"],
 ];
 
 const searchModeOptions = [

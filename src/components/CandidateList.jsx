@@ -1,7 +1,10 @@
 import ReferenceLink from "./ReferenceLink.jsx";
 import { referenceIdentifierText, toStringList } from "../lib/formatters.js";
 
-export default function CandidateList({ candidates, selectedIds, meta, onToggle, t }) {
+const CANDIDATE_BYLINE_MAX_CHARS = 260;
+const CANDIDATE_ABSTRACT_MAX_CHARS = 900;
+
+export default function CandidateList({ candidates, selectedIds, meta, onToggle, t, feedbackVotes = {}, feedbackPending = {}, onFeedback }) {
   const qualified = candidates.filter((reference) => reference.candidate_group === "qualified");
   const needsReview = candidates.filter((reference) => reference.candidate_group === "needs_review");
   const rejected = candidates.filter((reference) => reference.candidate_group === "rejected");
@@ -21,15 +24,15 @@ export default function CandidateList({ candidates, selectedIds, meta, onToggle,
     <>
       {meta ? <p id="searchCandidateMeta" className="candidate-meta">{meta}</p> : null}
       <div className="candidate-list">
-        <CandidateGroup title={t("candidate.qualified")} references={qualified} selectedIds={selectedIds} onToggle={onToggle} t={t} />
-        <CandidateGroup title={t("candidate.needsReview")} references={needsReview} selectedIds={selectedIds} onToggle={onToggle} t={t} />
-        <CandidateGroup title={t("candidate.rejectedReferences")} references={rejected} selectedIds={selectedIds} onToggle={onToggle} t={t} selectable={false} />
+        <CandidateGroup title={t("candidate.qualified")} references={qualified} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} />
+        <CandidateGroup title={t("candidate.needsReview")} references={needsReview} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} />
+        <CandidateGroup title={t("candidate.rejectedReferences")} references={rejected} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} selectable={false} />
       </div>
     </>
   );
 }
 
-function CandidateGroup({ title, references, selectedIds, onToggle, t, selectable = true }) {
+function CandidateGroup({ title, references, selectedIds, onToggle, t, feedbackVotes, feedbackPending, onFeedback, selectable = true }) {
   if (!references.length) return null;
   return (
     <section className="candidate-group">
@@ -40,6 +43,9 @@ function CandidateGroup({ title, references, selectedIds, onToggle, t, selectabl
           checked={selectable && selectedIds.has(reference.candidate_id)}
           onToggle={onToggle}
           t={t}
+          feedbackVote={feedbackVotes[reference.candidate_id] || ""}
+          feedbackPending={Boolean(feedbackPending[reference.candidate_id])}
+          onFeedback={onFeedback}
           selectable={selectable}
           key={reference.candidate_id}
         />
@@ -48,7 +54,7 @@ function CandidateGroup({ title, references, selectedIds, onToggle, t, selectabl
   );
 }
 
-function CandidateItem({ reference, checked, onToggle, t, selectable = true }) {
+function CandidateItem({ reference, checked, onToggle, t, feedbackVote = "", feedbackPending = false, onFeedback, selectable = true }) {
   const status = reference.candidate_group === "needs_review" ? "needs_review" : reference.screening_status || reference.candidate_group;
   const risks = visibleRiskItems(reference);
   const identifier = translatedIdentifier(referenceIdentifierText(reference), t);
@@ -57,6 +63,8 @@ function CandidateItem({ reference, checked, onToggle, t, selectable = true }) {
     reference.candidate_group === "needs_review" ? "needs-review" : "",
     reference.candidate_group === "rejected" ? "rejected-reference" : "",
   ].filter(Boolean).join(" ");
+  const byline = [reference.authors, reference.year, reference.source_label].filter(Boolean).join(" · ") || t("candidate.incompleteMeta");
+  const abstract = reference.abstract || reference.relevance || t("candidate.noAbstract");
   return (
     <article className={itemClass}>
       <label className="candidate-check">
@@ -73,13 +81,42 @@ function CandidateItem({ reference, checked, onToggle, t, selectable = true }) {
       </label>
       <div className="candidate-main">
         <h3><ReferenceLink title={reference.title || t("candidate.untitled")} source={reference.source || ""} t={t} /></h3>
-        <p className="candidate-byline">{[reference.authors, reference.year, reference.source_label].filter(Boolean).join(" · ") || t("candidate.incompleteMeta")}</p>
+        <p className="candidate-byline">{truncateDisplayText(byline, CANDIDATE_BYLINE_MAX_CHARS)}</p>
         <p className="candidate-idline">{identifier}</p>
-        <p className="candidate-abstract">{reference.abstract || reference.relevance || t("candidate.noAbstract")}</p>
+        <p className="candidate-abstract">{truncateDisplayText(abstract, CANDIDATE_ABSTRACT_MAX_CHARS)}</p>
         {risks.length ? <p className="candidate-risks">{t("candidate.risks", { text: risks.join("；") })}</p> : null}
       </div>
+      {onFeedback ? (
+        <div className="candidate-feedback" aria-label={t("feedback.label")}>
+          <span>{t("feedback.prompt")}</span>
+          <div className="candidate-feedback-actions">
+            <button
+              type="button"
+              className={feedbackVote === "yes" ? "is-selected" : ""}
+              disabled={feedbackPending}
+              onClick={() => onFeedback(reference, "yes")}
+            >
+              {t("feedback.yes")}
+            </button>
+            <button
+              type="button"
+              className={feedbackVote === "no" ? "is-selected" : ""}
+              disabled={feedbackPending}
+              onClick={() => onFeedback(reference, "no")}
+            >
+              {t("feedback.no")}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </article>
   );
+}
+
+function truncateDisplayText(value, maxChars) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function translatedIdentifier(identifier, t) {

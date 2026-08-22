@@ -5,10 +5,8 @@ import LoadingState from "../components/LoadingState.jsx";
 const sourceOptions = [
   ["arxiv", "arXiv"],
   ["pubmed", "PubMed"],
-  ["semantic", "Semantic Scholar"],
   ["crossref", "Crossref"],
   ["openalex", "OpenAlex"],
-  ["cnki", "search.cnki"],
 ];
 
 const searchModeOptions = [
@@ -27,12 +25,15 @@ export default function StandaloneSearchView({
   candidateMeta,
   candidates,
   selectedCandidateIds,
+  feedbackVotes,
+  feedbackPending,
   showStartNewTask = false,
   hasSearchResult = false,
   onSearchFormChange,
   onToggleSource,
   onSubmitSearch,
   onToggleCandidate,
+  onCandidateFeedback,
   onStartNewTask,
   onGoToSearchFlow,
   t,
@@ -283,7 +284,7 @@ export default function StandaloneSearchView({
             {searchLoading ? (
               <LoadingState title={t("search.loadingTitle")} message={t("search.loadingMessage")} />
             ) : hasSearchResult ? (
-              <CandidateList candidates={candidates} selectedIds={selectedCandidateIds} meta="" onToggle={onToggleCandidate} t={t} />
+              <CandidateList candidates={candidates} selectedIds={selectedCandidateIds} meta="" onToggle={onToggleCandidate} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onCandidateFeedback} />
             ) : (
               <div className="candidate-list">
                 <div className="candidate-empty">{t("standaloneSearch.emptyResults")}</div>

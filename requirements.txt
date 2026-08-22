@@ -1,5 +1,6 @@
 openai>=1.0.0
 python-dotenv>=1.0.0
+certifi>=2024.0.0
 # PostgreSQL driver for DATABASE_URL=postgresql://... in production. SQLite is built in for local development.
 psycopg[binary]>=3.2.0
 celery[redis]>=5.4.0

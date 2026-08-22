@@ -235,6 +235,32 @@ export async function deleteHistoryEntry(historyId) {
   return data;
 }
 
+export async function submitReferenceFeedback({ historyId = "", referenceKey = "", vote = "", reference = {} } = {}) {
+  const response = await apiFetch("/api/reference-feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      history_id: historyId,
+      reference_key: referenceKey,
+      vote,
+      reference: {
+        title: reference.title || "",
+        source_label: reference.source_label || "",
+        retrieved_from: reference.retrieved_from || "",
+        doi: reference.doi || "",
+        pmid: reference.pmid || "",
+        arxiv_id: reference.arxiv_id || "",
+        candidate_id: reference.candidate_id || "",
+        dedupe_key: reference.dedupe_key || "",
+        source: reference.source || "",
+      },
+    }),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
 function normalizeOutputLanguage(language) {
   return language === "en" ? "en" : "zh";
 }

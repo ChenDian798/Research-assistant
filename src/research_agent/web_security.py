@@ -211,6 +211,9 @@ class UserDataStore:
                 # local-development build are non-destructive.
                 f"CREATE TABLE IF NOT EXISTS history_entries (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, job_id {identity}, kind {identity} NOT NULL, status {identity} NOT NULL, title {identity}, payload {json_type} NOT NULL, created_at {identity} NOT NULL, updated_at {identity} NOT NULL, expires_at {identity})",
                 f"CREATE INDEX IF NOT EXISTS history_entries_owner_updated ON history_entries(owner_user_id, updated_at DESC)",
+                f"CREATE TABLE IF NOT EXISTS reference_feedback (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, history_id {identity}, reference_key {identity} NOT NULL, vote {identity} NOT NULL, title {identity}, source_label {identity}, doi {identity}, pmid {identity}, arxiv_id {identity}, created_at {identity} NOT NULL, updated_at {identity} NOT NULL)",
+                f"CREATE UNIQUE INDEX IF NOT EXISTS reference_feedback_owner_history_ref ON reference_feedback(owner_user_id, history_id, reference_key)",
+                f"CREATE INDEX IF NOT EXISTS reference_feedback_owner_updated ON reference_feedback(owner_user_id, updated_at DESC)",
                 f"CREATE TABLE IF NOT EXISTS job_events (id {identity} PRIMARY KEY, job_id {identity} NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, status {identity}, stage {identity}, progress INTEGER, detail {json_type}, created_at {identity} NOT NULL)",
                 f"CREATE INDEX IF NOT EXISTS job_events_job_created ON job_events(job_id, created_at)",
                 f"CREATE TABLE IF NOT EXISTS documents (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, original_name {identity} NOT NULL, content_type {identity}, sha256 {identity} NOT NULL, object_key {identity} NOT NULL, scan_status {identity} NOT NULL, created_at {identity} NOT NULL, expires_at {identity})",
@@ -462,6 +465,63 @@ class UserDataStore:
         with self._connect() as connection:
             rows = self._execute(connection, "SELECT payload FROM history_entries WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT ?", (owner, limit)).fetchall()
             return [decode_json_value(row[0], {}) for row in rows]
+
+    def record_reference_feedback(self, owner: str, payload: dict) -> dict:
+        now = utc_now()
+        history_id = str(payload.get("history_id") or "").strip()
+        reference = payload.get("reference") if isinstance(payload.get("reference"), dict) else {}
+        reference_key = str(
+            payload.get("reference_key")
+            or reference.get("candidate_id")
+            or reference.get("dedupe_key")
+            or reference.get("doi")
+            or reference.get("pmid")
+            or reference.get("arxiv_id")
+            or reference.get("source")
+            or reference.get("title")
+            or ""
+        ).strip()
+        vote = str(payload.get("vote") or "").strip().lower()
+        if vote not in {"yes", "no"}:
+            raise ValueError("Feedback vote must be yes or no.")
+        if not reference_key:
+            raise ValueError("Feedback reference key is required.")
+        item = {
+            "id": uuid.uuid4().hex,
+            "owner_user_id": owner,
+            "history_id": history_id,
+            "reference_key": reference_key[:500],
+            "vote": vote,
+            "title": str(reference.get("title") or "")[:500],
+            "source_label": str(reference.get("source_label") or reference.get("retrieved_from") or "")[:160],
+            "doi": str(reference.get("doi") or "")[:255],
+            "pmid": str(reference.get("pmid") or "")[:64],
+            "arxiv_id": str(reference.get("arxiv_id") or "")[:64],
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connect() as connection:
+            existing = self._execute(
+                connection,
+                "SELECT id, created_at FROM reference_feedback WHERE owner_user_id=? AND history_id=? AND reference_key=?",
+                (owner, item["history_id"], item["reference_key"]),
+            ).fetchone()
+            if existing:
+                item["id"] = existing[0]
+                item["created_at"] = existing[1]
+                self._execute(
+                    connection,
+                    "UPDATE reference_feedback SET vote=?, title=?, source_label=?, doi=?, pmid=?, arxiv_id=?, updated_at=? WHERE id=?",
+                    (item["vote"], item["title"], item["source_label"], item["doi"], item["pmid"], item["arxiv_id"], item["updated_at"], item["id"]),
+                )
+            else:
+                self._execute(
+                    connection,
+                    "INSERT INTO reference_feedback (id, owner_user_id, history_id, reference_key, vote, title, source_label, doi, pmid, arxiv_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item["id"], owner, item["history_id"], item["reference_key"], item["vote"], item["title"], item["source_label"], item["doi"], item["pmid"], item["arxiv_id"], item["created_at"], item["updated_at"]),
+                )
+            connection.commit()
+        return item
 
     def admin_histories(
         self,
@@ -1126,6 +1186,7 @@ class UserDataStore:
         with self._connect() as connection:
             self._execute(connection, "DELETE FROM history_entries WHERE updated_at < ?", (cutoff,))
             self._execute(connection, "DELETE FROM jobs WHERE updated_at < ?", (cutoff,))
+            self._execute(connection, "DELETE FROM reference_feedback WHERE updated_at < ?", (cutoff,))
             files = self._execute(connection, "SELECT storage_path FROM files WHERE expires_at < ?", (utc_now(),)).fetchall()
             self._execute(connection, "DELETE FROM files WHERE expires_at < ?", (utc_now(),))
             self._execute(connection, "DELETE FROM documents WHERE expires_at < ?", (utc_now(),))

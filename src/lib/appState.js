@@ -18,9 +18,20 @@ export const defaultNoveltyForm = {
   innovationText: "",
   searchMode: "auto",
   year: "",
-  sources: ["arxiv", "pubmed", "semantic"],
+  sources: ["arxiv", "pubmed"],
   includeFilteredReferences: false,
 };
+
+const enabledPaperSources = new Set(["arxiv", "pubmed", "crossref", "openalex"]);
+
+export function normalizeEnabledPaperSources(sources, fallback = ["arxiv", "pubmed"]) {
+  const items = Array.isArray(sources) ? sources : String(sources || "").split(",");
+  const normalized = items
+    .map((source) => String(source || "").trim().toLowerCase())
+    .map((source) => source === "semantic-scholar" ? "semantic" : source)
+    .filter((source, index, list) => enabledPaperSources.has(source) && list.indexOf(source) === index);
+  return normalized.length ? normalized : fallback;
+}
 
 export function viewFromHash(hash = window.location.hash) {
   const value = hash.replace("#", "");

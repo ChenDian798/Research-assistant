@@ -355,7 +355,7 @@ class SearchRouteService:
         per_source_cap = handler._search_result_cap()
         return {
             "query": str(payload.get("query", "") or "").strip(),
-            "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed,semantic").strip(),
+            "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed").strip(),
             "max_results_per_source": handler._bounded_int(
                 payload.get("max_results_per_source"),
                 default=handler._bounded_int(os.getenv("PAPER_SEARCH_MAX_RESULTS_PER_SOURCE"), default=5, minimum=1, maximum=per_source_cap),
@@ -603,7 +603,7 @@ class SearchRouteService:
         per_source_cap = handler._search_result_cap()
         return {
             "innovation_text": str(payload.get("innovation_text") or payload.get("query") or "").strip(),
-            "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed,semantic").strip(),
+            "sources": str(payload.get("sources") or os.getenv("PAPER_SEARCH_DEFAULT_SOURCES") or "arxiv,pubmed").strip(),
             "search_mode": str(payload.get("search_mode") or "auto").strip().lower() or "auto",
             "year": str(payload.get("year") or "").strip(),
             "max_results_per_source": handler._bounded_int(
@@ -732,7 +732,9 @@ class SearchRouteService:
                 source = "semantic"
             if source and source not in sources:
                 sources.append(source)
-        return sources or ["arxiv", "pubmed", "semantic"]
+        disabled_sources = {"semantic", "cnki"}
+        sources = [source for source in sources if source not in disabled_sources]
+        return sources or ["arxiv", "pubmed"]
 
     @staticmethod
     def _reference_source_bucket(reference: dict, source_names: list[str]) -> str:

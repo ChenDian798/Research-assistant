@@ -431,6 +431,10 @@ const translations = {
     "standaloneSearch.newTaskConfirm": "当前检索任务或结果会保留在历史记录里。确定要开启新任务吗？",
     "standaloneSearch.newTaskReady": "已开启新检索任务，可继续输入主题。",
     "standaloneSearch.sendToFlow": "送入检索流程",
+    "feedback.label": "文献反馈",
+    "feedback.prompt": "是否符合需求",
+    "feedback.yes": "符合",
+    "feedback.no": "不符合",
 
     "direct.title": "直接添加文献分析",
     "direct.lead": "这个入口只服务“我已经有文件或链接，直接分析”的任务，不展示检索结果池。",
@@ -1069,6 +1073,10 @@ const translations = {
     "standaloneSearch.newTaskConfirm": "The current search task or result will stay in History. Start a new task?",
     "standaloneSearch.newTaskReady": "New search task started. Enter a topic to continue.",
     "standaloneSearch.sendToFlow": "Send to search flow",
+    "feedback.label": "Reference feedback",
+    "feedback.prompt": "Relevant to your need?",
+    "feedback.yes": "Relevant",
+    "feedback.no": "Not relevant",
 
     "direct.title": "Direct literature analysis",
     "direct.lead": "Use this entry when you already have files or links and want to analyze them directly, without a search-results pool.",

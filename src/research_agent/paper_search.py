@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import threading
 import time
@@ -28,6 +29,11 @@ from .doi import (
 from .llm import LLMClient
 from .reference_relevance import expand_query_terms, group_matches, normalize_text, query_profile
 
+try:
+    import certifi
+except ImportError:  # pragma: no cover - certifi is declared in requirements.
+    certifi = None
+
 
 SOURCE_LABELS = {
     "arxiv": "arXiv",
@@ -45,6 +51,7 @@ USER_AGENT = "ResearchAgent-LiteratureSearch/0.1"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 _ARXIV_REQUEST_LOCK = threading.Lock()
 _ARXIV_LAST_REQUEST_AT = 0.0
+_HTTPS_CONTEXT: ssl.SSLContext | None = None
 AUTHOR_FIELD_QUERY_RE = re.compile(r'^(?:au|author):(?:"([^"]+)"|(.+))$', re.IGNORECASE)
 INTENT_LABELS = ("title", "author", "citation", "topic", "method_task", "abstract")
 BIBLIOGRAPHIC_INTENTS = {"title", "author+title", "citation", "citation_with_title_author"}
@@ -190,12 +197,10 @@ SOURCE_VERIFICATION_SCORE = {
     "arxiv": 0.95,
     "pubmed": 0.95,
     "crossref": 0.9,
-    "semantic": 0.85,
     "biorxiv": 0.8,
     "medrxiv": 0.8,
     "openalex": 0.65,
     "google_scholar": 0.55,
-    "cnki": 0.55,
 }
 LLM_QUERY_REWRITE_SYSTEM_PROMPT = """
 You are a biomedical literature search query planner.
@@ -203,7 +208,7 @@ Your job is to rewrite a user's research topic into precise English search queri
 Return only valid JSON, no markdown.
 Schema:
 {
-  "search_query": "single concise query for general academic search APIs such as Crossref, OpenAlex, Semantic Scholar, arXiv, and CNKI",
+  "search_query": "single concise query for general academic search APIs such as Crossref, OpenAlex, and arXiv",
   "pubmed_query": "PubMed-ready English Boolean query, or empty if not biomedical",
   "query_intent": "title|author|author+title|citation|topic|method_task|abstract",
   "intent_confidence": 0.0,
@@ -224,7 +229,7 @@ Schema:
   ],
   "synonyms": ["standard biomedical synonym or spelling variant"],
   "forbidden_broadenings": ["overbroad concept that must not replace the user intent"],
-  "recommended_sources": ["pubmed", "crossref", "openalex", "semantic", "arxiv", "cnki"],
+  "recommended_sources": ["pubmed", "crossref", "openalex", "arxiv"],
   "avoid_sources": ["arxiv"],
   "rationale": "brief explanation of the rewrite"
 }
@@ -261,7 +266,7 @@ Your job is to rewrite a user's research topic into precise English search queri
 Return only valid JSON, no markdown.
 Schema:
 {
-  "search_query": "single concise query for general academic search APIs such as Crossref, OpenAlex, Semantic Scholar, arXiv, and CNKI",
+  "search_query": "single concise query for general academic search APIs such as Crossref, OpenAlex, and arXiv",
   "pubmed_query": "PubMed-ready English Boolean query, or empty unless the topic has a clear health, public-health, psychology, or medical-social component",
   "query_intent": "title|author|author+title|citation|topic|method_task|abstract",
   "intent_confidence": 0.0,
@@ -282,7 +287,7 @@ Schema:
   ],
   "synonyms": ["standard synonym, spelling variant, or related social-science term"],
   "forbidden_broadenings": ["overbroad concept that must not replace the user intent"],
-  "recommended_sources": ["crossref", "openalex", "semantic", "arxiv", "cnki", "pubmed"],
+  "recommended_sources": ["crossref", "openalex", "arxiv", "pubmed"],
   "avoid_sources": ["pubmed"],
   "rationale": "brief explanation of the rewrite"
 }
@@ -294,13 +299,13 @@ Rules:
 - For author+title or citation inputs, put the clean paper title in extracted.title and author names in extracted.authors; do not merge them into an exact-title query.
 - For author intent, keep the author name in search_query. For citation intent, preserve author, year, title, and venue details when present.
 - For abstract intent, extract core population, phenomenon, method, context, and outcome before creating concise queries.
-- For Chinese social-science topics, translate the full phrase into precise English scholarly terms. Keep CNKI useful by allowing the caller to use the original Chinese query for CNKI.
+- For Chinese social-science topics, translate the full phrase into precise English scholarly terms.
 - Do not broaden a specific topic into a generic one. For example:
   - Do not broaden "rural left-behind children education inequality" into "education".
   - Do not broaden "platform labor algorithmic management in China" into "labor market".
   - Do not broaden "housing affordability and fertility intentions" into "urban policy".
 - Use standard social-science synonyms and related constructs, but do not invent theories, datasets, measures, or countries.
-- Prefer Crossref, OpenAlex, and Semantic Scholar for most social-science topics. Recommend arXiv only for computational social science, quantitative methods, networks, NLP, economics preprints, or model-heavy topics.
+- Prefer Crossref and OpenAlex for most social-science topics. Recommend arXiv only for computational social science, quantitative methods, networks, NLP, economics preprints, or model-heavy topics.
 - PubMed should be empty or avoided unless the topic is clearly public health, mental health, psychology, epidemiology, health policy, or medical sociology.
 - search_query must be English, concise, and under 350 characters.
 - pubmed_query must be English and under 600 characters.
@@ -314,7 +319,7 @@ Your job is to rewrite a user's research topic into precise English search queri
 Return only valid JSON, no markdown.
 Schema:
 {
-  "search_query": "single concise query for general academic search APIs such as arXiv, Semantic Scholar, Crossref, OpenAlex, and CNKI",
+  "search_query": "single concise query for general academic search APIs such as arXiv, Crossref, and OpenAlex",
   "pubmed_query": "PubMed-ready English Boolean query, or empty unless the topic has a clear biomedical, clinical, public-health, or health-AI component",
   "query_intent": "title|author|author+title|citation|topic|method_task|abstract",
   "intent_confidence": 0.0,
@@ -335,7 +340,7 @@ Schema:
   ],
   "synonyms": ["standard computer-science synonym, abbreviation, spelling variant, or closely equivalent technical term"],
   "forbidden_broadenings": ["overbroad concept that must not replace the user intent"],
-  "recommended_sources": ["arxiv", "semantic", "openalex", "crossref", "cnki", "pubmed"],
+  "recommended_sources": ["arxiv", "openalex", "crossref", "pubmed"],
   "avoid_sources": ["pubmed"],
   "rationale": "brief explanation of the rewrite"
 }
@@ -348,13 +353,13 @@ Rules:
 - For author intent, keep the author name in search_query. For citation intent, preserve author, year, title, and venue details when present.
 - For abstract intent, extract core method/model, task, dataset/benchmark, domain, and metric before creating concise queries.
 - Treat AI, machine learning, deep learning, NLP, computer vision, robotics, data mining, software engineering, security, systems, databases, HCI, and hardware architecture as computer-science topics.
-- For Chinese computer-science topics, translate the full phrase into precise English technical terms. Keep CNKI useful by allowing the caller to use the original Chinese query for CNKI.
+- For Chinese computer-science topics, translate the full phrase into precise English technical terms.
 - Do not broaden a specific topic into a generic one. For example:
   - Do not broaden "retrieval augmented generation for legal question answering" into "large language models".
   - Do not broaden "federated learning with differential privacy" into "machine learning".
   - Do not broaden "graph neural networks for traffic forecasting" into "neural networks".
 - Use standard technical synonyms and abbreviations, but do not invent datasets, benchmarks, metrics, systems, or algorithms.
-- Prefer arXiv and Semantic Scholar for AI/CS topics; Crossref and OpenAlex are useful for published proceedings and journals. Recommend PubMed only for biomedical or health-related AI.
+- Prefer arXiv for AI/CS topics; Crossref and OpenAlex are useful for published proceedings and journals. Recommend PubMed only for biomedical or health-related AI.
 - search_query must be English, concise, and under 350 characters.
 - pubmed_query must be English and under 600 characters.
 - Do not include Chinese characters in search_query or pubmed_query.
@@ -367,7 +372,7 @@ Your job is to rewrite a user's research topic into precise English search queri
 Return only valid JSON, no markdown.
 Schema:
 {
-  "search_query": "single concise query for general academic search APIs such as Crossref, OpenAlex, Semantic Scholar, arXiv, and CNKI",
+  "search_query": "single concise query for general academic search APIs such as Crossref, OpenAlex, and arXiv",
   "pubmed_query": "PubMed-ready English Boolean query, or empty unless the topic has a clear biomedical, clinical, environmental-health, or safety-health component",
   "query_intent": "title|author|author+title|citation|topic|method_task|abstract",
   "intent_confidence": 0.0,
@@ -388,7 +393,7 @@ Schema:
   ],
   "synonyms": ["standard engineering synonym, abbreviation, spelling variant, or related applied-technology term"],
   "forbidden_broadenings": ["overbroad concept that must not replace the user intent"],
-  "recommended_sources": ["crossref", "openalex", "semantic", "arxiv", "cnki", "pubmed"],
+  "recommended_sources": ["crossref", "openalex", "arxiv", "pubmed"],
   "avoid_sources": ["pubmed"],
   "rationale": "brief explanation of the rewrite"
 }
@@ -401,13 +406,13 @@ Rules:
 - For author intent, keep the author name in search_query. For citation intent, preserve author, year, title, and venue details when present.
 - For abstract intent, extract core system/material, method, performance target, application sector, and operating condition before creating concise queries.
 - Treat mechanical, electrical, civil, chemical, materials, energy, manufacturing, transportation, aerospace, robotics hardware, and industrial engineering as engineering topics.
-- For Chinese engineering topics, translate the full phrase into precise English engineering terms. Keep CNKI useful by allowing the caller to use the original Chinese query for CNKI.
+- For Chinese engineering topics, translate the full phrase into precise English engineering terms.
 - Do not broaden a specific topic into a generic one. For example:
   - Do not broaden "lithium-ion battery thermal runaway prediction" into "battery management".
   - Do not broaden "wind turbine blade fault diagnosis using vibration signals" into "renewable energy".
   - Do not broaden "self-healing concrete crack repair" into "construction materials".
 - Use standard engineering synonyms and abbreviations, but do not invent materials, standards, datasets, devices, or test conditions.
-- Prefer Crossref, OpenAlex, and Semantic Scholar for engineering topics. Recommend arXiv for control, robotics, optimization, signal processing, computational engineering, and model-heavy topics.
+- Prefer Crossref and OpenAlex for engineering topics. Recommend arXiv for control, robotics, optimization, signal processing, computational engineering, and model-heavy topics.
 - PubMed should be empty or avoided unless the topic is clearly biomedical engineering, clinical devices, occupational health, environmental health, or safety-health.
 - search_query must be English, concise, and under 350 characters.
 - pubmed_query must be English and under 600 characters.
@@ -453,7 +458,7 @@ Schema:
     "method_terms": ["methods/models explicitly present"],
     "task_terms": ["tasks/applications explicitly present"]
   },
-  "search_query": "single concise query for general academic search APIs such as arXiv, Crossref, OpenAlex, Semantic Scholar, and CNKI",
+  "search_query": "single concise query for general academic search APIs such as arXiv, Crossref, and OpenAlex",
   "pubmed_query": "PubMed-ready English Boolean query, or empty unless biomedical/health-related",
   "core_concepts": [
     {
@@ -464,7 +469,7 @@ Schema:
   ],
   "synonyms": ["standard synonym, abbreviation, spelling variant, or closely equivalent scholarly term"],
   "forbidden_broadenings": ["overbroad concept that must not replace the user intent"],
-  "recommended_sources": ["pubmed", "crossref", "openalex", "semantic", "arxiv", "cnki"],
+  "recommended_sources": ["pubmed", "crossref", "openalex", "arxiv"],
   "avoid_sources": ["pubmed"],
   "rationale": "brief explanation of the domain and rewrite"
 }
@@ -1968,7 +1973,7 @@ def merge_extracted_fields(base, override) -> dict:
 def normalize_sources_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
-    allowed = {"arxiv", "pubmed", "semantic", "crossref", "openalex", "biorxiv", "medrxiv", "google_scholar", "cnki"}
+    allowed = {"arxiv", "pubmed", "crossref", "openalex", "biorxiv", "medrxiv", "google_scholar"}
     normalized = []
     for item in value:
         source = normalize_source_name(item)
@@ -2950,15 +2955,15 @@ def repair_canonical_metadata_candidates(
 
 
 def canonical_repair_sources(requested_sources: list[str]) -> list[str]:
-    preferred = ["arxiv", "semantic", "openalex", "crossref"]
-    available = [source for source in preferred if source in {"arxiv", "semantic", "openalex", "crossref"}]
+    preferred = ["arxiv", "openalex", "crossref"]
+    available = [source for source in preferred if source in {"arxiv", "openalex", "crossref"}]
     requested = [normalize_source_name(source) for source in requested_sources or []]
     return list(dict.fromkeys([*available, *(source for source in requested if source in available)]))
 
 
 def canonical_preference_key(paper: dict) -> tuple[int, int, str]:
     source = normalize_source_name(paper.get("retrieved_from") or paper.get("source_label"))
-    source_rank = {"arxiv": 0, "semantic": 1, "openalex": 2, "crossref": 3}.get(source, 9)
+    source_rank = {"arxiv": 0, "openalex": 1, "crossref": 2}.get(source, 9)
     has_stable_id = 0 if (paper.get("arxiv_id") or paper.get("pmid") or paper.get("doi")) else 1
     return (source_rank, has_stable_id, str(paper.get("title") or ""))
 
@@ -3761,6 +3766,13 @@ def search_arxiv_title_api(title: str, max_results: int) -> list[dict]:
     return parse_arxiv_atom(xml)
 
 
+def https_context() -> ssl.SSLContext:
+    global _HTTPS_CONTEXT
+    if _HTTPS_CONTEXT is None:
+        _HTTPS_CONTEXT = ssl.create_default_context(cafile=certifi.where() if certifi else None)
+    return _HTTPS_CONTEXT
+
+
 def fetch_arxiv_atom(params: dict, *, timeout_seconds: int) -> str:
     attempts = max(1, min(int(os.getenv("PAPER_SEARCH_ARXIV_RETRIES", "2") or 2), 4))
     last_error: Exception | None = None
@@ -3771,7 +3783,7 @@ def fetch_arxiv_atom(params: dict, *, timeout_seconds: int) -> str:
             headers={"Accept": "application/atom+xml", "User-Agent": USER_AGENT},
         )
         try:
-            with urlopen(request, timeout=max(1, int(timeout_seconds or 20))) as response:
+            with urlopen(request, timeout=max(1, int(timeout_seconds or 20)), context=https_context()) as response:
                 return response.read().decode("utf-8", errors="replace")
         except HTTPError as error:
             last_error = error
@@ -3865,7 +3877,7 @@ def fetch_json_url(url: str, params: dict, *, headers: dict | None = None) -> di
         headers=request_headers,
     )
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20, context=https_context()) as response:
             return json.loads(response.read().decode("utf-8", errors="replace"))
     except HTTPError as error:
         host = urlparse(url).netloc
@@ -3920,9 +3932,11 @@ def normalize_sources(sources: str | list[str] | tuple[str, ...]) -> list[str]:
             continue
         if item == "semantic-scholar":
             item = "semantic"
+        if item in {"semantic", "cnki"}:
+            continue
         if item not in normalized:
             normalized.append(item)
-    return normalized or ["arxiv", "pubmed", "semantic"]
+    return normalized or ["arxiv", "pubmed"]
 
 
 def normalize_search_payload(payload: dict, requested_sources: list[str]) -> tuple[list[dict], dict, dict]:

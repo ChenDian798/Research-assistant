@@ -7,10 +7,8 @@ import Stepper from "../components/Stepper.jsx";
 const sourceOptions = [
   ["arxiv", "arXiv"],
   ["pubmed", "PubMed"],
-  ["semantic", "Semantic Scholar"],
   ["crossref", "Crossref"],
   ["openalex", "OpenAlex"],
-  ["cnki", "search.cnki"],
 ];
 
 const searchModeOptions = [
@@ -30,6 +28,8 @@ export default function SearchFlowView({
   candidateMeta,
   candidates,
   selectedCandidateIds,
+  feedbackVotes,
+  feedbackPending,
   stagedReferences,
   analysisRunning,
   analysisQueued = false,
@@ -41,6 +41,7 @@ export default function SearchFlowView({
   onToggleSource,
   onSubmitSearch,
   onToggleCandidate,
+  onCandidateFeedback,
   onAddSelected,
   onRemoveStaged,
   onAnalyze,
@@ -285,7 +286,7 @@ export default function SearchFlowView({
             {searchLoading ? (
               <LoadingState title={t("search.loadingTitle")} message={t("search.loadingMessage")} />
             ) : hasSearchResult ? (
-              <CandidateList candidates={candidates} selectedIds={selectedCandidateIds} meta="" onToggle={onToggleCandidate} t={t} />
+              <CandidateList candidates={candidates} selectedIds={selectedCandidateIds} meta="" onToggle={onToggleCandidate} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onCandidateFeedback} />
             ) : (
               <div className="candidate-list">
                 <div className="candidate-empty">{t("search.emptyAfterSearch")}</div>

@@ -188,14 +188,14 @@ def build_layered_queries(plan: dict) -> list[dict]:
             ]
         )
     else:
-        queries.append(query("academic_broad_topic", "broad_topic", ["semantic", "openalex", "crossref"], topic, "broad", 10))
+        queries.append(query("academic_broad_topic", "broad_topic", ["openalex", "crossref"], topic, "broad", 10))
 
     queries.extend(
         [
-            query("general_broad_topic", "broad_topic", ["semantic", "openalex", "crossref"], topic, "broad", 10),
-            query("general_core_topic", "core_topic", ["semantic", "openalex", "crossref"], join_query(core[:4] or required[:4]), "medium", 10),
-            query("semantic_method_overlap", "method_overlap", ["semantic", "openalex", "crossref", "arxiv"], method_topic, "medium", 10),
-            query("semantic_context_overlap", "context_overlap", ["semantic", "openalex", "crossref", "arxiv"], context_topic, "medium", 8),
+            query("general_broad_topic", "broad_topic", ["openalex", "crossref"], topic, "broad", 10),
+            query("general_core_topic", "core_topic", ["openalex", "crossref"], join_query(core[:4] or required[:4]), "medium", 10),
+            query("method_overlap", "method_overlap", ["openalex", "crossref", "arxiv"], method_topic, "medium", 10),
+            query("context_overlap", "context_overlap", ["openalex", "crossref", "arxiv"], context_topic, "medium", 8),
         ]
     )
     for index, baseline in enumerate(baselines[:4]):
@@ -203,14 +203,14 @@ def build_layered_queries(plan: dict) -> list[dict]:
             query(
                 f"baseline_overlap_{index + 1}",
                 "baseline_overlap",
-                ["semantic", "openalex", "crossref", "arxiv", "pubmed"] if domain == "biomedical" else ["semantic", "openalex", "crossref", "arxiv"],
+                ["openalex", "crossref", "arxiv", "pubmed"] if domain == "biomedical" else ["openalex", "crossref", "arxiv"],
                 join_query([baseline, *(core[:3] or required[:3])]),
                 "narrow",
                 8,
             )
         )
     if not baselines:
-        queries.append(query("baseline_overlap_generic", "baseline_overlap", ["semantic", "openalex", "crossref", "arxiv"], join_query([*(methods[:2] or core[:2]), "baseline comparison"]), "medium", 8))
+        queries.append(query("baseline_overlap_generic", "baseline_overlap", ["openalex", "crossref", "arxiv"], join_query([*(methods[:2] or core[:2]), "baseline comparison"]), "medium", 8))
     queries.extend(build_claim_queries(plan, domain))
     return dedupe_queries(queries)
 
@@ -234,7 +234,7 @@ def build_claim_queries(plan: dict, domain: str) -> list[dict]:
         task_terms = [*(core[:3]), *(contexts[:2])]
         if not exact_terms:
             exact_terms = split_claim_terms(claim_text)[:5]
-        source_set = ["semantic", "openalex", "crossref", "arxiv"]
+        source_set = ["openalex", "crossref", "arxiv"]
         if domain == "biomedical":
             exact_text = pubmed_query(core[:2] + methods[:1] + contexts[:1])
             method_text = pubmed_query((methods[:2] or core[:2]) + baselines[:1])
@@ -244,7 +244,7 @@ def build_claim_queries(plan: dict, domain: str) -> list[dict]:
                     query(
                         f"{claim_id}_exact_claim",
                         "claim_exact",
-                        ["pubmed", "semantic", "openalex", "crossref"],
+                        ["pubmed", "openalex", "crossref"],
                         exact_text or join_query(exact_terms),
                         "medium",
                         8,
@@ -254,7 +254,7 @@ def build_claim_queries(plan: dict, domain: str) -> list[dict]:
                     query(
                         f"{claim_id}_method_generalized",
                         "claim_method_generalized",
-                        ["semantic", "openalex", "crossref", "arxiv", "pubmed"],
+                        ["openalex", "crossref", "arxiv", "pubmed"],
                         method_text or join_query(method_terms),
                         "broad",
                         8,
@@ -264,7 +264,7 @@ def build_claim_queries(plan: dict, domain: str) -> list[dict]:
                     query(
                         f"{claim_id}_task_generalized",
                         "claim_task_generalized",
-                        ["pubmed", "semantic", "openalex", "crossref"],
+                        ["pubmed", "openalex", "crossref"],
                         task_text or join_query(task_terms),
                         "broad",
                         8,
@@ -289,7 +289,7 @@ def build_claim_queries(plan: dict, domain: str) -> list[dict]:
                     query(
                         f"{claim_id}_method_generalized",
                         "claim_method_generalized",
-                        ["semantic", "openalex", "crossref", "arxiv"],
+                        ["openalex", "crossref", "arxiv"],
                         join_query(method_terms or exact_terms),
                         "broad",
                         8,
@@ -299,7 +299,7 @@ def build_claim_queries(plan: dict, domain: str) -> list[dict]:
                     query(
                         f"{claim_id}_task_generalized",
                         "claim_task_generalized",
-                        ["semantic", "openalex", "crossref"],
+                        ["openalex", "crossref"],
                         join_query(task_terms or exact_terms),
                         "broad",
                         8,

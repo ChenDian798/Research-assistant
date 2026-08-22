@@ -38,6 +38,7 @@ import {
   submitLinkLiteratureAnalysis,
   submitLiteratureSearchRequest,
   submitNoveltyCheckRequest,
+  submitReferenceFeedback,
   logout,
   waitForJob,
 } from "./lib/api.js";
@@ -52,6 +53,7 @@ import {
   isActiveHistoryEntry,
   isHistorySummaryOnly,
   mergeHistorySummaryIntoDetail,
+  normalizeEnabledPaperSources,
   storedAnalysisResult,
   viewFromHash,
 } from "./lib/appState.js";
@@ -84,6 +86,8 @@ export default function App() {
   const [candidatePayload, setCandidatePayload] = useState({ rejected_count: 0, errors: {} });
   const [searchCandidateReferences, setSearchCandidateReferences] = useState([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState(new Set());
+  const [candidateFeedbackVotes, setCandidateFeedbackVotes] = useState({});
+  const [candidateFeedbackPending, setCandidateFeedbackPending] = useState({});
   const [stagedAnalysisReferences, setStagedAnalysisReferences] = useState([]);
   const [activeSearchHistoryId, setActiveSearchHistoryId] = useState("");
   const [searchAnalysisQueued, setSearchAnalysisQueued] = useState(false);
@@ -95,6 +99,8 @@ export default function App() {
   const [standaloneCandidatePayload, setStandaloneCandidatePayload] = useState({ rejected_count: 0, errors: {} });
   const [standaloneSearchCandidateReferences, setStandaloneSearchCandidateReferences] = useState([]);
   const [standaloneSelectedCandidateIds, setStandaloneSelectedCandidateIds] = useState(new Set());
+  const [standaloneCandidateFeedbackVotes, setStandaloneCandidateFeedbackVotes] = useState({});
+  const [standaloneCandidateFeedbackPending, setStandaloneCandidateFeedbackPending] = useState({});
   const [standaloneActiveSearchHistoryId, setStandaloneActiveSearchHistoryId] = useState("");
   const [standaloneHasSearchResult, setStandaloneHasSearchResult] = useState(false);
   const [noveltyForm, setNoveltyForm] = useState(defaultNoveltyForm);
@@ -287,10 +293,7 @@ export default function App() {
         innovationText: request.innovation_text || entry.title || "",
         searchMode: request.search_mode || current.searchMode || "auto",
         year: request.year || "",
-        sources: String(request.sources || "")
-          .split(",")
-          .map((source) => source.trim())
-          .filter(Boolean),
+        sources: normalizeEnabledPaperSources(request.sources),
         includeFilteredReferences: Boolean(request.include_filtered_references),
       }));
       setNoveltyRunning(false);
@@ -311,10 +314,7 @@ export default function App() {
         searchMode: request.search_mode || result.search_mode || current.searchMode || "auto",
         year: request.year || "",
         limit: String(request.max_results_per_source || current.limit || "5"),
-        sources: String(request.sources || "")
-          .split(",")
-          .map((source) => source.trim())
-          .filter(Boolean),
+        sources: normalizeEnabledPaperSources(request.sources),
         includeNeedsReview: request.include_needs_review !== false,
       }));
       setStandaloneSearchLoading(false);
@@ -702,9 +702,9 @@ export default function App() {
   function handleToggleSource(value, checked) {
     setSearchForm((current) => ({
       ...current,
-      sources: checked
+      sources: normalizeEnabledPaperSources(checked
         ? [...current.sources, value]
-        : current.sources.filter((source) => source !== value),
+        : current.sources.filter((source) => source !== value), []),
     }));
   }
 
@@ -715,9 +715,9 @@ export default function App() {
   function handleStandaloneToggleSource(value, checked) {
     setStandaloneSearchForm((current) => ({
       ...current,
-      sources: checked
+      sources: normalizeEnabledPaperSources(checked
         ? [...current.sources, value]
-        : current.sources.filter((source) => source !== value),
+        : current.sources.filter((source) => source !== value), []),
     }));
   }
 
@@ -728,9 +728,9 @@ export default function App() {
   function handleNoveltyToggleSource(value, checked) {
     setNoveltyForm((current) => ({
       ...current,
-      sources: checked
+      sources: normalizeEnabledPaperSources(checked
         ? [...current.sources, value]
-        : current.sources.filter((source) => source !== value),
+        : current.sources.filter((source) => source !== value), []),
     }));
   }
 
@@ -738,6 +738,8 @@ export default function App() {
     const { references, selectedIds, qualified, needsReview } = normalizeSearchResultPayload(payload);
     setSearchCandidateReferences(references);
     setSelectedCandidateIds(selectedIds);
+    setCandidateFeedbackVotes({});
+    setCandidateFeedbackPending({});
     setCandidatePayload(payload);
     setHasSearchResult(true);
     setSearchStatus(t("status.searchComplete", {
@@ -754,6 +756,8 @@ export default function App() {
     const { references, selectedIds, qualified, needsReview } = normalizeSearchResultPayload(payload);
     setStandaloneSearchCandidateReferences(references);
     setStandaloneSelectedCandidateIds(selectedIds);
+    setStandaloneCandidateFeedbackVotes({});
+    setStandaloneCandidateFeedbackPending({});
     setStandaloneCandidatePayload(payload);
     setStandaloneHasSearchResult(true);
     setStandaloneSearchStatus(t("status.searchComplete", {
@@ -787,6 +791,33 @@ export default function App() {
       reference.dedupe_key || reference.source || reference.doi || reference.title || `candidate-${index}`
     )));
     return { references, selectedIds, qualified, needsReview, rejected };
+  }
+
+  async function handleCandidateFeedback(scope, reference, vote) {
+    const candidateId = reference?.candidate_id || "";
+    if (!candidateId) return;
+    const isStandalone = scope === "standalone";
+    const historyId = isStandalone ? standaloneActiveSearchHistoryId : activeSearchHistoryId;
+    const setVotes = isStandalone ? setStandaloneCandidateFeedbackVotes : setCandidateFeedbackVotes;
+    const setPending = isStandalone ? setStandaloneCandidateFeedbackPending : setCandidateFeedbackPending;
+    setVotes((current) => ({ ...current, [candidateId]: vote }));
+    setPending((current) => ({ ...current, [candidateId]: true }));
+    try {
+      await submitReferenceFeedback({
+        historyId,
+        referenceKey: candidateId,
+        vote,
+        reference,
+      });
+    } catch (error) {
+      console.warn("reference feedback was not recorded", error);
+    } finally {
+      setPending((current) => {
+        const next = { ...current };
+        delete next[candidateId];
+        return next;
+      });
+    }
   }
 
   function showSearchTaskTarget(targetView, step = 2) {
@@ -1263,6 +1294,8 @@ export default function App() {
             candidateMeta={standaloneCandidateMeta}
             candidates={standaloneSearchCandidateReferences}
             selectedCandidateIds={standaloneSelectedCandidateIds}
+            feedbackVotes={standaloneCandidateFeedbackVotes}
+            feedbackPending={standaloneCandidateFeedbackPending}
             showStartNewTask={Boolean(standaloneActiveSearchHistoryId || standaloneSearchLoading || standaloneHasSearchResult)}
             hasSearchResult={standaloneHasSearchResult}
             onSearchFormChange={handleStandaloneSearchFormChange}
@@ -1276,6 +1309,7 @@ export default function App() {
                 return next;
               });
             }}
+            onCandidateFeedback={(reference, vote) => handleCandidateFeedback("standalone", reference, vote)}
             onStartNewTask={startNewStandaloneSearchTask}
             onGoToSearchFlow={sendStandaloneSearchToFlow}
             t={t}
@@ -1307,6 +1341,8 @@ export default function App() {
             candidateMeta={candidateMeta}
             candidates={searchCandidateReferences}
             selectedCandidateIds={selectedCandidateIds}
+            feedbackVotes={candidateFeedbackVotes}
+            feedbackPending={candidateFeedbackPending}
             stagedReferences={stagedAnalysisReferences}
             analysisRunning={analysisRunning.search}
             analysisQueued={searchAnalysisQueued}
@@ -1318,6 +1354,7 @@ export default function App() {
             onToggleSource={handleToggleSource}
             onSubmitSearch={() => submitLiteratureSearch("search")}
             onToggleCandidate={toggleCandidate}
+            onCandidateFeedback={(reference, vote) => handleCandidateFeedback("search", reference, vote)}
             onAddSelected={addSelectedSearchReferencesToAnalysis}
             onRemoveStaged={removeStagedAnalysisReference}
             onAnalyze={() => submitLiteratureAnalysisFromSource("search")}

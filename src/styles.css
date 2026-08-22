@@ -4257,7 +4257,7 @@ select:focus {
 
 .candidate-item {
   display: grid;
-  grid-template-columns: 176px minmax(0, 1fr);
+  grid-template-columns: 176px minmax(0, 1fr) 148px;
   gap: 15px;
   padding: 16px;
   border: 1px solid #e8eef8;
@@ -4312,6 +4312,52 @@ select:focus {
   min-width: 0;
 }
 
+.candidate-feedback {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  justify-items: center;
+  padding-top: 1px;
+  text-align: center;
+}
+
+.candidate-feedback-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  width: 100%;
+}
+
+.candidate-feedback button {
+  min-height: 30px;
+  border: 1px solid #d7e2f2;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  font: inherit;
+  cursor: pointer;
+}
+
+.candidate-feedback button:hover,
+.candidate-feedback button:focus-visible {
+  border-color: #8fb3f8;
+  color: #1f5fd6;
+}
+
+.candidate-feedback button.is-selected {
+  border-color: rgba(52, 199, 176, 0.72);
+  background: #dcfbf5;
+  color: #0f766e;
+}
+
+.candidate-feedback button:disabled {
+  cursor: progress;
+  opacity: 0.62;
+}
+
 .candidate-main h3 {
   margin: 0 0 6px;
   color: #111827;
@@ -4337,10 +4383,13 @@ select:focus {
   color: #4e5d73;
   font-size: 13px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .candidate-abstract {
   color: #263246;
+  max-height: 13.5em;
+  overflow: hidden;
 }
 
 .candidate-risks {
@@ -7124,6 +7173,13 @@ select:focus {
 
   .candidate-item {
     grid-template-columns: 1fr;
+  }
+
+  .candidate-feedback {
+    grid-template-columns: auto minmax(130px, 180px);
+    align-items: center;
+    justify-items: start;
+    text-align: left;
   }
 
   .selected-reference-item {

@@ -554,6 +554,9 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
                 return
             self._request_user_id = user["id"]
             CURRENT_USER_ID.set(user["id"])
+        if path == "/api/reference-feedback":
+            self._handle_reference_feedback()
+            return
         if path == "/api/export/pdf":
             self._handle_pdf_export()
             return
@@ -1046,6 +1049,15 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ValueError("Expected a JSON object.")
         return data
+
+    def _handle_reference_feedback(self) -> None:
+        try:
+            payload = self._read_json()
+            feedback = DATA_STORE.record_reference_feedback(self._request_user_id, payload)
+        except ValueError as error:
+            self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        self._send_json({"ok": True, "feedback_id": feedback["id"], "vote": feedback["vote"]})
 
     def _server_port(self) -> int | str:
         server = getattr(self, "server", None)
