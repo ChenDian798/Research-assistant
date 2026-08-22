@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import io
+import os
 from pathlib import Path
 import re
 
@@ -26,21 +27,32 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
         raise RuntimeError("PDF export requires reportlab. Run: pip install -r requirements.txt") from error
 
     font_name = "Helvetica"
-    for font_path in [
-        Path("C:/Windows/Fonts/NotoSansSC-VF.ttf"),
-        Path("C:/Windows/Fonts/msyh.ttc"),
-        Path("C:/Windows/Fonts/simhei.ttf"),
-        Path("C:/Windows/Fonts/simsun.ttc"),
-        Path("C:/Windows/Fonts/arial.ttf"),
-    ]:
-        if not font_path.exists():
-            continue
+    font_errors = []
+    for regular_path, bold_path in pdf_font_candidates():
         try:
-            pdfmetrics.registerFont(TTFont("ResearchFont", str(font_path)))
+            pdfmetrics.registerFont(TTFont("ResearchFont", str(regular_path)))
+            selected_bold_path = bold_path if bold_path and bold_path.exists() else regular_path
+            pdfmetrics.registerFont(TTFont("ResearchFontBold", str(selected_bold_path)))
+            pdfmetrics.registerFontFamily(
+                "ResearchFont",
+                normal="ResearchFont",
+                bold="ResearchFontBold",
+                italic="ResearchFont",
+                boldItalic="ResearchFontBold",
+            )
             font_name = "ResearchFont"
             break
-        except Exception:
+        except Exception as error:
+            font_errors.append(f"{regular_path}: {type(error).__name__}: {error}")
             continue
+    if font_name == "Helvetica" and contains_cjk_text(f"{title}\n{markdown}"):
+        detail = f" Tried: {'; '.join(font_errors)}" if font_errors else ""
+        raise RuntimeError(
+            "PDF export requires a ReportLab-compatible Chinese font. Install "
+            "fonts-wqy-zenhei and set "
+            "PDF_FONT_PATH=/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc."
+            + detail
+        )
 
     styles = getSampleStyleSheet()
     normal = ParagraphStyle(
@@ -187,6 +199,50 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
     flush_list()
     doc.build(story)
     return buffer.getvalue()
+
+
+def contains_cjk_text(value: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff\uf900-\ufaff]", str(value or "")))
+
+
+def pdf_font_candidates() -> list[tuple[Path, Path | None]]:
+    configured_regular = str(os.getenv("PDF_FONT_PATH", "") or "").strip()
+    configured_bold = str(os.getenv("PDF_BOLD_FONT_PATH", "") or "").strip()
+    candidates: list[tuple[Path, Path | None]] = []
+    if configured_regular:
+        candidates.append(
+            (
+                Path(configured_regular).expanduser(),
+                Path(configured_bold).expanduser() if configured_bold else None,
+            )
+        )
+    candidates.extend(
+        [
+            (
+                Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+                Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+            ),
+            (
+                Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+                Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf"),
+            ),
+            (
+                Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+                None,
+            ),
+            (
+                Path("C:/Windows/Fonts/NotoSansSC-VF.ttf"),
+                Path("C:/Windows/Fonts/Noto Sans SC Bold (TrueType).otf"),
+            ),
+            (
+                Path("C:/Windows/Fonts/msyh.ttc"),
+                Path("C:/Windows/Fonts/msyhbd.ttc"),
+            ),
+            (Path("C:/Windows/Fonts/simhei.ttf"), None),
+            (Path("C:/Windows/Fonts/simsun.ttc"), None),
+        ]
+    )
+    return [(regular, bold) for regular, bold in candidates if regular.exists()]
 
 
 def pdf_inline_text(value: str) -> str:

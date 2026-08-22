@@ -34,6 +34,16 @@ MAX_UPLOAD_TOTAL_MB=30
    Copy `deploy/research-agent.env.example` to
    `/etc/research-agent/research-agent.env`, replace every placeholder, and set
    ownership to `root:research-agent` with mode `0640`.
+   Install the CJK font used by PDF export and configure its paths:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y fonts-wqy-zenhei
+   ```
+
+   ```env
+   PDF_FONT_PATH=/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
+   ```
 2. Start the backing services, including ClamAV:
 
    ```bash

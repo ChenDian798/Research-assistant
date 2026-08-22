@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import web_app
-from src.research_agent.web_security import UserDataStore, configure_store
+from src.research_agent.web_security import ObjectStorage, UserDataStore, configure_store, decode_json_value
 
 
 @pytest.fixture
@@ -24,6 +26,55 @@ def _handler(path: str, cookie: str = "", csrf: str = ""):
     sent = {}
     handler._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)
     return handler, sent
+
+
+def test_postgres_jsonb_values_are_accepted_without_redecoding() -> None:
+    payload = {"status": "queued", "request": {"topic": "stroke"}}
+
+    assert decode_json_value(payload, {}) is payload
+    assert decode_json_value('{"status": "queued"}', {}) == {"status": "queued"}
+
+
+def test_claiming_retry_clears_stale_terminal_metadata(isolated_store) -> None:
+    user = isolated_store.provision_user("retry-user")
+    job, _created = isolated_store.create_job(user["id"], "literature_analysis", {})
+    isolated_store.save_job(
+        user["id"],
+        job["id"],
+        {
+            "status": "queued",
+            "stage": "Retry scheduled",
+            "error": "previous attempt failed",
+            "finished_at": "2026-01-01T00:00:00+00:00",
+        },
+    )
+
+    claimed = isolated_store.claim_job(job["id"], task_id="retry-task", attempt=2)
+
+    assert claimed is not None
+    assert claimed["status"] == "running"
+    assert claimed["stage"] == "Worker accepted job"
+    assert claimed["progress"] == 1
+    assert claimed["error"] is None
+    assert claimed["finished_at"] is None
+    assert claimed["started_at"] is not None
+
+
+def test_minio_upload_does_not_request_unconfigured_server_side_encryption(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    client = SimpleNamespace(put_object=lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda *_args, **_kwargs: client))
+    monkeypatch.setenv("OBJECT_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("S3_BUCKET", "private-bucket")
+    monkeypatch.delenv("S3_SERVER_SIDE_ENCRYPTION", raising=False)
+    monkeypatch.delenv("S3_SSE_KMS_KEY_ID", raising=False)
+
+    storage = ObjectStorage(tmp_path)
+    storage.put("user", "uploads", "paper.pdf", b"pdf")
+
+    assert calls[0]["Bucket"] == "private-bucket"
+    assert "ServerSideEncryption" not in calls[0]
+    assert "SSEKMSKeyId" not in calls[0]
 
 
 def _user_session(store: UserDataStore, subject: str):

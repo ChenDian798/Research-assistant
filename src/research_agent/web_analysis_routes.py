@@ -431,6 +431,9 @@ class AnalysisRouteService:
     ) -> dict:
         return {
             "status": "done",
+            "stage": "Analysis complete",
+            "progress": 100,
+            "error": None,
             "kind": "literature_analysis",
             "port": port,
             "rows": rows,

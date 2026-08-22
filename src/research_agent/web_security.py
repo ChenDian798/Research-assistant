@@ -31,6 +31,15 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def decode_json_value(value, default):
+    """Accept SQLite JSON text and psycopg-decoded PostgreSQL JSONB values."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)
+
+
 PASSWORD_HASH_VERSION = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 310_000
 
@@ -82,6 +91,8 @@ class ObjectStorage:
         self.mode = os.getenv("OBJECT_STORAGE_BACKEND", "local").strip().casefold()
         self.root = root
         self.bucket = os.getenv("S3_BUCKET", "")
+        self.server_side_encryption = os.getenv("S3_SERVER_SIDE_ENCRYPTION", "").strip()
+        self.sse_kms_key_id = os.getenv("S3_SSE_KMS_KEY_ID", "").strip()
         self._client = None
         if self.mode == "s3":
             if not self.bucket:
@@ -95,7 +106,12 @@ class ObjectStorage:
     def put(self, owner: str, kind: str, filename: str, content: bytes) -> str:
         key = f"private/{owner}/{kind}/{uuid.uuid4().hex}_{Path(filename).name or 'file'}"
         if self.mode == "s3":
-            self._client.put_object(Bucket=self.bucket, Key=key, Body=content, ServerSideEncryption="AES256")
+            put_options = {"Bucket": self.bucket, "Key": key, "Body": content}
+            if self.server_side_encryption:
+                put_options["ServerSideEncryption"] = self.server_side_encryption
+            if self.sse_kms_key_id:
+                put_options["SSEKMSKeyId"] = self.sse_kms_key_id
+            self._client.put_object(**put_options)
             return f"s3://{self.bucket}/{key}"
         target = (self.root / owner / kind / Path(key).name).resolve()
         if self.root not in target.parents:
@@ -271,7 +287,7 @@ class UserDataStore:
         rows = self._execute(connection, "SELECT id, owner_user_id, payload, created_at, updated_at FROM histories").fetchall()
         for row in rows:
             history_id, owner, payload, created_at, updated_at = row[0], row[1], row[2], row[3], row[4]
-            entry = json.loads(payload)
+            entry = decode_json_value(payload, {})
             self._execute(
                 connection,
                 "INSERT INTO history_entries (id, owner_user_id, job_id, kind, status, title, payload, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
@@ -408,19 +424,19 @@ class UserDataStore:
 
     def history(self, owner: str, history_id: str) -> dict | None:
         row = self._fetchone("SELECT payload FROM history_entries WHERE id=? AND owner_user_id=?", (history_id, owner))
-        return json.loads(row["payload"]) if row else None
+        return decode_json_value(row["payload"], {}) if row else None
 
     def histories(self, owner: str, limit: int) -> list[dict]:
         with self._connect() as connection:
             rows = self._execute(connection, "SELECT payload FROM history_entries WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT ?", (owner, limit)).fetchall()
-            return [json.loads(row[0]) for row in rows]
+            return [decode_json_value(row[0], {}) for row in rows]
 
     def update_history_internal(self, history_id: str, mutate) -> bool:
         with self._connect() as connection:
             row = self._execute(connection, "SELECT owner_user_id, payload FROM history_entries WHERE id=?", (history_id,)).fetchone()
             if not row:
                 return False
-            owner, payload = row[0], json.loads(row[1])
+            owner, payload = row[0], decode_json_value(row[1], {})
             mutate(payload)
             self._execute(connection, "UPDATE history_entries SET job_id=?, kind=?, status=?, title=?, payload=?, updated_at=? WHERE id=?", (payload.get("job_id"), payload.get("kind", "legacy"), payload.get("status", "queued"), payload.get("title", ""), json.dumps(payload, ensure_ascii=False), payload.get("updated_at", utc_now()), history_id))
             connection.commit()
@@ -499,12 +515,22 @@ class UserDataStore:
     def _hydrate_job(self, row: dict | None) -> dict:
         if not row:
             return {}
-        payload = json.loads(row.get("payload") or "{}")
-        payload.update({key: row.get(key) for key in ("id", "owner_user_id", "kind", "status", "stage", "progress", "error", "idempotency_key", "task_id", "attempt", "created_at", "started_at", "finished_at", "expires_at") if row.get(key) is not None})
+        payload = decode_json_value(row.get("payload"), {})
+        # Structured columns are authoritative, including nullable values.  A retry
+        # deliberately clears fields such as error and finished_at; ignoring NULL
+        # here would resurrect their stale values from the compatibility payload.
+        payload.update({
+            key: row.get(key)
+            for key in (
+                "id", "owner_user_id", "kind", "status", "stage", "progress",
+                "error", "idempotency_key", "task_id", "attempt", "created_at",
+                "started_at", "finished_at", "expires_at",
+            )
+            if key in row
+        })
         for key, column in (("request", "request_json"), ("result", "result_json")):
-            value = row.get(column)
-            if value:
-                payload[key] = json.loads(value) if isinstance(value, str) else value
+            if column in row:
+                payload[key] = decode_json_value(row.get(column), {})
         payload.update(payload.get("result") or {})
         return payload
 
@@ -523,7 +549,7 @@ class UserDataStore:
         with self._connect() as connection:
             cursor = self._execute(
                 connection,
-                "UPDATE jobs SET status=?, stage=?, progress=?, task_id=?, attempt=?, started_at=COALESCE(started_at, ?), updated_at=? WHERE id=? AND (status='queued' OR (status='running' AND updated_at < ?))",
+                "UPDATE jobs SET status=?, stage=?, progress=?, task_id=?, attempt=?, started_at=?, finished_at=NULL, error=NULL, updated_at=? WHERE id=? AND (status='queued' OR (status='running' AND updated_at < ?))",
                 ("running", "Worker accepted job", 1, task_id or None, attempt, now, now, job_id, cutoff),
             )
             if not cursor.rowcount:
@@ -538,7 +564,7 @@ class UserDataStore:
             return []
         with self._connect() as connection:
             rows = self._execute(connection, "SELECT status, stage, progress, detail, created_at FROM job_events WHERE job_id=? ORDER BY created_at", (job_id,)).fetchall()
-            return [{"status": row[0], "stage": row[1], "progress": row[2], "detail": json.loads(row[3] or "{}"), "created_at": row[4]} for row in rows]
+            return [{"status": row[0], "stage": row[1], "progress": row[2], "detail": decode_json_value(row[3], {}), "created_at": row[4]} for row in rows]
 
     def recoverable_job_ids(self, *, stale_after_seconds: int = 300, limit: int = 100) -> list[str]:
         """IDs that can be safely re-enqueued after a broker/API/worker outage."""
@@ -688,9 +714,9 @@ class UserDataStore:
                         event = dict(event_row)
                     else:
                         event = dict(zip([column[0] for column in event_cursor.description], event_row))
-                    event["detail"] = json.loads(event.pop("detail_json") or "{}")
+                    event["detail"] = decode_json_value(event.pop("detail_json"), {})
                     events.append(event)
-                item["result"] = json.loads(item.pop("result_json") or "{}")
+                item["result"] = decode_json_value(item.pop("result_json"), {})
                 item["events"] = events
                 items.append(item)
         detail["items"] = items
@@ -704,7 +730,7 @@ class UserDataStore:
         items = []
         for row in rows:
             item = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))
-            item["result"] = json.loads(item.pop("result_json") or "{}")
+            item["result"] = decode_json_value(item.pop("result_json"), {})
             items.append(item)
         return items
 
@@ -740,7 +766,7 @@ class UserDataStore:
     @staticmethod
     def _evaluation_run_from_row(row: dict) -> dict:
         item = dict(row)
-        item["request"] = json.loads(item.pop("request_json") or "{}")
+        item["request"] = decode_json_value(item.pop("request_json"), {})
         return item
 
     def enforce_retention(self, days: int) -> None:
