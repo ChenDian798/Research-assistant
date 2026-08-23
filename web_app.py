@@ -36,6 +36,7 @@ from src.research_agent.reference_screening import screen_references
 from src.research_agent.reference_verification import verify_references
 from src.research_agent.web_analysis_routes import AnalysisRouteService
 from src.research_agent.web_history import (
+    apply_history_analysis_update,
     apply_history_entry_update,
     history_entry_summary,
     history_references,
@@ -2213,6 +2214,28 @@ Rules:
 
     @staticmethod
     def _start_history_analysis(history_id: str, job_id: str, request: dict) -> None:
+        history_id = str(history_id or "").strip()
+        if not history_id:
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+
+        def mutate(entry: dict) -> None:
+            entry["kind"] = "search_flow"
+            entry["status"] = "running"
+            entry["stage"] = "Running LLM literature analysis..."
+            entry["job_id"] = job_id
+            entry["analysis"] = {
+                "status": "queued",
+                "stage": "Queued literature analysis",
+                "job_id": job_id,
+                "request": request,
+                "result": {},
+                "counts": {"references": request.get("reference_count", 0)},
+            }
+            entry["updated_at"] = now
+
+        if DATA_STORE.update_history_internal(history_id, mutate):
+            return
         return AnalysisRouteService(ResearchWebHandler)._start_history_analysis(history_id, job_id, request)
 
     @staticmethod
@@ -2226,6 +2249,16 @@ Rules:
         counts: dict | None = None,
         error: str | None = None,
     ) -> None:
+        if history_slot == "analysis":
+            ResearchWebHandler._update_history_analysis(
+                history_id,
+                status=status,
+                stage=stage,
+                result=result,
+                counts=counts,
+                error=error,
+            )
+            return
         return AnalysisRouteService(ResearchWebHandler)._update_analysis_history(
             history_id,
             history_slot,
@@ -2246,6 +2279,23 @@ Rules:
         counts: dict | None = None,
         error: str | None = None,
     ) -> None:
+        history_id = str(history_id or "").strip()
+        if not history_id:
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        if DATA_STORE.update_history_internal(
+            history_id,
+            lambda entry: apply_history_analysis_update(
+                entry,
+                now,
+                status=status,
+                stage=stage,
+                result=result,
+                counts=counts,
+                error=error,
+            ),
+        ):
+            return
         return AnalysisRouteService(ResearchWebHandler)._update_history_analysis(
             history_id,
             status=status,

@@ -459,12 +459,160 @@ class UserDataStore:
 
     def history(self, owner: str, history_id: str) -> dict | None:
         row = self._fetchone("SELECT payload FROM history_entries WHERE id=? AND owner_user_id=?", (history_id, owner))
-        return decode_json_value(row["payload"], {}) if row else None
+        entry = decode_json_value(row["payload"], {}) if row else None
+        return self._recover_history_analysis(owner, entry) if entry else None
 
     def histories(self, owner: str, limit: int) -> list[dict]:
         with self._connect() as connection:
             rows = self._execute(connection, "SELECT payload FROM history_entries WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT ?", (owner, limit)).fetchall()
-            return [decode_json_value(row[0], {}) for row in rows]
+            entries = [decode_json_value(row[0], {}) for row in rows]
+        return self._recover_history_analyses(owner, entries)
+
+    @staticmethod
+    def _history_needs_analysis_recovery(entry: dict) -> bool:
+        if not isinstance(entry, dict) or entry.get("kind") not in {"literature_search", "search_flow"}:
+            return False
+        analysis = entry.get("analysis") if isinstance(entry.get("analysis"), dict) else {}
+        result = analysis.get("result") if isinstance(analysis.get("result"), dict) else {}
+        rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+        summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        return not bool(rows or summary)
+
+    @staticmethod
+    def _job_history_key(job: dict) -> tuple[str, str]:
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        history_id = str(request.get("history_id") or result.get("history_id") or job.get("history_id") or "").strip()
+        history_slot = str(request.get("history_slot") or result.get("history_slot") or job.get("history_slot") or "").strip()
+        return history_id, history_slot
+
+    @staticmethod
+    def _compact_history_references(references: object) -> list[dict]:
+        if not isinstance(references, list):
+            return []
+        heavy_keys = {
+            "abstract",
+            "content_excerpt",
+            "evidence_source_text",
+            "full_text_for_evidence",
+            "raw_source_record",
+            "pdf_metadata",
+            "bibliographic_identity",
+        }
+        return [
+            {key: value for key, value in reference.items() if key not in heavy_keys}
+            for reference in references
+            if isinstance(reference, dict)
+        ]
+
+    @classmethod
+    def _analysis_payload_from_job(cls, job: dict) -> dict:
+        if not isinstance(job, dict) or not job.get("id"):
+            return {}
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        rows = result.get("rows", job.get("rows", []))
+        summary = result.get("summary", job.get("summary", {}))
+        references = result.get("references", job.get("references", []))
+        rows = rows if isinstance(rows, list) else []
+        summary = summary if isinstance(summary, dict) else {}
+        references = references if isinstance(references, list) else []
+        public_request = {
+            key: request.get(key)
+            for key in ("topic", "reference_count", "has_context", "citation_format", "output_language")
+            if key in request
+        }
+        public_request["references"] = cls._compact_history_references(request.get("references"))
+        public_request.setdefault("reference_count", len(public_request["references"]) or len(references))
+        payload = {
+            "status": job.get("status") or "",
+            "stage": job.get("stage") or "",
+            "job_id": job.get("id") or "",
+            "request": public_request,
+            "result": {
+                "rows": rows,
+                "summary": summary,
+                "references": references,
+                "citation_format": result.get("citation_format", job.get("citation_format", "")),
+                "output_language": result.get("output_language", job.get("output_language", "")),
+            },
+            "counts": {
+                "references": public_request.get("reference_count", 0),
+                "rows": len(rows),
+            },
+        }
+        if job.get("error"):
+            payload["error"] = job.get("error")
+        return payload
+
+    @staticmethod
+    def _apply_recovered_history_analysis(entry: dict, analysis: dict) -> dict:
+        recovered = dict(entry)
+        recovered["kind"] = "search_flow"
+        recovered["analysis"] = analysis
+        if analysis.get("status"):
+            recovered["status"] = analysis["status"]
+        if analysis.get("stage"):
+            recovered["stage"] = analysis["stage"]
+        if analysis.get("job_id"):
+            recovered["job_id"] = analysis["job_id"]
+        if analysis.get("error"):
+            recovered["error"] = analysis["error"]
+        return recovered
+
+    def _recent_jobs(self, owner: str | None = None, limit: int = 500) -> list[dict]:
+        limit = max(1, min(int(limit or 500), 1000))
+        sql = "SELECT * FROM jobs"
+        params: tuple = ()
+        if owner:
+            sql += " WHERE owner_user_id=?"
+            params = (owner,)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params = (*params, limit)
+        with self._connect() as connection:
+            cursor = self._execute(connection, sql, params)
+            rows = cursor.fetchall()
+            columns = [item[0] for item in cursor.description]
+        return [self._hydrate_job(dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))) for row in rows]
+
+    def job_for_history_slot(self, history_id: str, history_slot: str = "analysis", *, owner: str | None = None) -> dict | None:
+        history_id = str(history_id or "").strip()
+        history_slot = str(history_slot or "").strip()
+        if not history_id or not history_slot:
+            return None
+        for job in self._recent_jobs(owner=owner):
+            candidate_history_id, candidate_slot = self._job_history_key(job)
+            if candidate_history_id == history_id and candidate_slot == history_slot:
+                return job
+        return None
+
+    def _recover_history_analysis(self, owner: str | None, entry: dict) -> dict:
+        if not self._history_needs_analysis_recovery(entry):
+            return entry
+        job = self.job_for_history_slot(str(entry.get("id") or ""), "analysis", owner=owner)
+        analysis = self._analysis_payload_from_job(job or {})
+        return self._apply_recovered_history_analysis(entry, analysis) if analysis else entry
+
+    def _recover_history_analyses(self, owner: str | None, entries: list[dict]) -> list[dict]:
+        history_ids = {
+            str(entry.get("id") or "").strip()
+            for entry in entries
+            if self._history_needs_analysis_recovery(entry)
+        }
+        history_ids.discard("")
+        if not history_ids:
+            return entries
+        jobs_by_history_id: dict[str, dict] = {}
+        for job in self._recent_jobs(owner=owner, limit=max(500, len(history_ids) * 20)):
+            history_id, history_slot = self._job_history_key(job)
+            if history_slot == "analysis" and history_id in history_ids and history_id not in jobs_by_history_id:
+                jobs_by_history_id[history_id] = job
+        recovered_entries = []
+        for entry in entries:
+            job = jobs_by_history_id.get(str(entry.get("id") or "").strip())
+            analysis = self._analysis_payload_from_job(job or {})
+            recovered_entries.append(self._apply_recovered_history_analysis(entry, analysis) if analysis else entry)
+        return recovered_entries
 
     def record_reference_feedback(self, owner: str, payload: dict) -> dict:
         now = utc_now()
@@ -598,9 +746,15 @@ class UserDataStore:
             "created_at": row.get("created_at", detail.get("created_at", "")),
             "updated_at": row.get("updated_at", detail.get("updated_at", "")),
         }
+        result = self._recover_history_analysis(str(row.get("owner_user_id") or ""), result)
         job_id = str(result.get("job_id") or "").strip()
         job = self.job_by_id(job_id) if job_id else None
-        result["admin_summary"] = self._admin_history_observability_summary(result, job or {})
+        analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+        analysis_job_id = str(analysis.get("job_id") or "").strip()
+        analysis_job = self.job_by_id(analysis_job_id) if analysis_job_id else None
+        if not analysis_job:
+            analysis_job = self.job_for_history_slot(str(result.get("id") or ""), "analysis", owner=str(row.get("owner_user_id") or ""))
+        result["admin_summary"] = self._admin_history_observability_summary(result, job or {}, analysis_job or {})
         return result
 
     @staticmethod
@@ -625,7 +779,7 @@ class UserDataStore:
         }
 
     @staticmethod
-    def _admin_history_observability_summary(detail: dict, job: dict) -> dict:
+    def _admin_history_observability_summary(detail: dict, job: dict, analysis_job: dict | None = None) -> dict:
         result = detail.get("result") if isinstance(detail.get("result"), dict) else {}
         counts = detail.get("counts") if isinstance(detail.get("counts"), dict) else {}
         timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
@@ -648,6 +802,23 @@ class UserDataStore:
         job_created_at = str(job.get("created_at") or "")
         started_at = str(job.get("started_at") or "")
         finished_at = str(job.get("finished_at") or "")
+        analysis_job = analysis_job if isinstance(analysis_job, dict) else {}
+        analysis_created_at = str(analysis_job.get("created_at") or "")
+        analysis_started_at = str(analysis_job.get("started_at") or "")
+        analysis_finished_at = str(analysis_job.get("finished_at") or "")
+        analysis_summary = {}
+        if analysis_job:
+            analysis_summary = {
+                "status": analysis_job.get("status") or "",
+                "stage": analysis_job.get("stage") or "",
+                "job_id": analysis_job.get("id") or "",
+                "job_created_at": analysis_created_at,
+                "job_started_at": analysis_started_at,
+                "job_finished_at": analysis_finished_at,
+                "queue_seconds": UserDataStore._seconds_between(analysis_created_at, analysis_started_at),
+                "run_seconds": UserDataStore._seconds_between(analysis_started_at or analysis_created_at, analysis_finished_at),
+                "total_seconds": UserDataStore._seconds_between(analysis_created_at, analysis_finished_at),
+            }
         return {
             "status": detail.get("status") or job.get("status") or "",
             "stage": detail.get("stage") or job.get("stage") or "",
@@ -662,6 +833,7 @@ class UserDataStore:
             "total_seconds": UserDataStore._seconds_between(job_created_at or created_at, finished_at or updated_at),
             "counts": counts,
             "timings": timings,
+            "analysis": analysis_summary,
             "source_results": source_results,
             "warnings": [str(item) for item in warnings[:8]],
             "errors": errors[:8],

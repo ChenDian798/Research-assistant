@@ -582,6 +582,7 @@ function AdminHistoryInsight({ detail, t }) {
   const request = detail.request || {};
   const counts = summary.counts || {};
   const timings = summary.timings || {};
+  const analysisTiming = summary.analysis || {};
   const sourceResults = summary.source_results || {};
   const timingRows = [
     [t("admin.detailQueueTime"), formatDuration(summary.queue_seconds)],
@@ -591,6 +592,9 @@ function AdminHistoryInsight({ detail, t }) {
     [t("admin.detailRecall"), formatDuration(timingValue(timings, "recall_seconds"))],
     [t("admin.detailScreening"), formatDuration(timingValue(timings, "screening_seconds"))],
     [t("admin.detailVerification"), formatDuration(timingValue(timings, "verification_seconds"))],
+    [t("admin.detailAnalysisQueueTime"), formatDuration(analysisTiming.queue_seconds)],
+    [t("admin.detailAnalysisRunTime"), formatDuration(analysisTiming.run_seconds)],
+    [t("admin.detailAnalysisTotalTime"), formatDuration(analysisTiming.total_seconds)],
   ].filter(([, value]) => value !== "-");
   const countRows = [
     [t("admin.detailCandidates"), firstCount(counts, "candidates", "candidate_count", "raw", "raw_count", "references")],

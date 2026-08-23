@@ -2196,7 +2196,7 @@ def predict_query_intent_rules(query: str) -> dict:
 
 
 def should_use_llm_intent_prediction(query: str) -> bool:
-    mode = str(os.getenv("PAPER_SEARCH_INTENT_PREDICTION", "auto") or "").strip().casefold()
+    mode = str(os.getenv("PAPER_SEARCH_INTENT_PREDICTION", "false") or "").strip().casefold()
     if mode in {"0", "false", "off", "disabled", "rules"}:
         return False
     if not clean_text(query):
@@ -2204,7 +2204,7 @@ def should_use_llm_intent_prediction(query: str) -> bool:
     has_model = bool(os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_MODEL"))
     if mode in {"1", "true", "on", "enabled", "llm"}:
         return has_model
-    return has_model
+    return False
 
 
 async def classify_query_intent_with_llm(query: str, *, search_mode: str = "auto") -> dict:
@@ -3783,7 +3783,14 @@ def fetch_arxiv_atom(params: dict, *, timeout_seconds: int) -> str:
             headers={"Accept": "application/atom+xml", "User-Agent": USER_AGENT},
         )
         try:
-            with urlopen(request, timeout=max(1, int(timeout_seconds or 20)), context=https_context()) as response:
+            timeout = max(1, int(timeout_seconds or 20))
+            try:
+                response_context = urlopen(request, timeout=timeout, context=https_context())
+            except TypeError as error:
+                if "context" not in str(error):
+                    raise
+                response_context = urlopen(request, timeout=timeout)
+            with response_context as response:
                 return response.read().decode("utf-8", errors="replace")
         except HTTPError as error:
             last_error = error
@@ -3932,8 +3939,6 @@ def normalize_sources(sources: str | list[str] | tuple[str, ...]) -> list[str]:
             continue
         if item == "semantic-scholar":
             item = "semantic"
-        if item in {"semantic", "cnki"}:
-            continue
         if item not in normalized:
             normalized.append(item)
     return normalized or ["arxiv", "pubmed"]
