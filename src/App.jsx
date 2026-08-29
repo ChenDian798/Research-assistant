@@ -58,6 +58,64 @@ import {
   viewFromHash,
 } from "./lib/appState.js";
 
+function referenceFeedbackKeys(reference) {
+  return Array.from(new Set([
+    reference?.candidate_id,
+    referenceStableKey(reference || {}),
+  ].map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function referenceFeedbackValue(feedbackMap, reference) {
+  const keys = referenceFeedbackKeys(reference);
+  for (const key of keys) {
+    if (feedbackMap[key]) return feedbackMap[key];
+  }
+  return "";
+}
+
+function writeReferenceFeedback(feedbackMap, reference, value) {
+  const next = { ...feedbackMap };
+  referenceFeedbackKeys(reference).forEach((key) => {
+    next[key] = value;
+  });
+  return next;
+}
+
+function clearReferenceFeedback(feedbackMap, reference) {
+  const next = { ...feedbackMap };
+  referenceFeedbackKeys(reference).forEach((key) => {
+    delete next[key];
+  });
+  return next;
+}
+
+function syncReferenceFeedback(feedbackMap, references, changedReference, value) {
+  const changedStableKey = referenceStableKey(changedReference || {});
+  const changedCandidateId = String(changedReference?.candidate_id || "").trim();
+  return references.reduce((next, reference) => {
+    const isSameCandidate = changedCandidateId && reference.candidate_id === changedCandidateId;
+    const isSameReference = changedStableKey && referenceStableKey(reference) === changedStableKey;
+    return isSameCandidate || isSameReference ? writeReferenceFeedback(next, reference, value) : next;
+  }, writeReferenceFeedback(feedbackMap, changedReference, value));
+}
+
+function clearSyncedReferenceFeedback(feedbackMap, references, changedReference) {
+  const changedStableKey = referenceStableKey(changedReference || {});
+  const changedCandidateId = String(changedReference?.candidate_id || "").trim();
+  return references.reduce((next, reference) => {
+    const isSameCandidate = changedCandidateId && reference.candidate_id === changedCandidateId;
+    const isSameReference = changedStableKey && referenceStableKey(reference) === changedStableKey;
+    return isSameCandidate || isSameReference ? clearReferenceFeedback(next, reference) : next;
+  }, clearReferenceFeedback(feedbackMap, changedReference));
+}
+
+function mergeReferenceFeedbackForReferences(references, primaryFeedbackMap, fallbackFeedbackMap = {}) {
+  return references.reduce((next, reference) => {
+    const value = referenceFeedbackValue(primaryFeedbackMap, reference) || referenceFeedbackValue(fallbackFeedbackMap, reference);
+    return value ? writeReferenceFeedback(next, reference, value) : next;
+  }, { ...fallbackFeedbackMap });
+}
+
 export default function App() {
   const [language, setLanguage] = useState(getInitialLanguage);
   const [currentView, setCurrentView] = useState(viewFromHash);
@@ -148,9 +206,15 @@ export default function App() {
     }
   };
 
-  const showSearchStep = (step) => {
+  const showSearchStep = (step, options = {}) => {
+    const requestedStep = Number(step) || 1;
+    if (!options.force && requestedStep > maxReachableSearchStep) {
+      setSearchStatus(t("search.stepUnavailable"));
+      setSearchStatusError(false);
+      return;
+    }
     navigate("search");
-    setSearchStep(Number(step) || 1);
+    setSearchStep(requestedStep);
   };
 
   useEffect(() => {
@@ -308,6 +372,7 @@ export default function App() {
     if (entry?.kind === "literature_search" || entry?.kind === "search_flow") {
       const result = entry?.result || {};
       const references = historySearchCandidates(entry);
+      standaloneSearchRunId.current += 1;
       setStandaloneSearchForm((current) => ({
         ...current,
         query: request.query || result.query || entry.title || "",
@@ -335,6 +400,7 @@ export default function App() {
 
     if (entry?.kind === "search_analysis") {
       const references = Array.isArray(request.references) ? request.references : [];
+      searchRunId.current += 1;
       setSearchForm((current) => ({
         ...current,
         query: request.topic || entry.title || current.query,
@@ -380,6 +446,7 @@ export default function App() {
       const references = historySearchCandidates(entry);
       const flowAnalysis = entry?.analysis && typeof entry.analysis === "object" ? entry.analysis : null;
       const hasFlowAnalysisResult = hasStoredAnalysisResult(flowAnalysis);
+      searchRunId.current += 1;
       analysisRunIds.current.search += 1;
       setActiveSearchHistoryId(entry.id || "");
       setActiveAnalysisSource("search");
@@ -406,6 +473,7 @@ export default function App() {
       setHasSearchResult(true);
       setSearchStatus(t("history.continueSearchLoaded", { count: references.length }));
       setSearchStatusError(false);
+      setSearchLoading(false);
       setSearchAnalysisQueued(false);
       setAnalysisRunning((current) => ({ ...current, search: false }));
       if (hasFlowAnalysisResult) {
@@ -470,6 +538,25 @@ export default function App() {
     searchAnalysisResult.rows.length ||
     searchAnalysisResult.summary ||
     searchAnalysisResult.reviewNeededDocuments.length
+  );
+  const searchInputLocked = Boolean(
+    activeSearchHistoryId ||
+    searchLoading ||
+    hasSearchResult ||
+    searchCandidateReferences.length ||
+    stagedAnalysisReferences.length ||
+    searchAnalysisQueued ||
+    analysisRunning.search ||
+    hasSearchAnalysisResult
+  );
+  const maxReachableSearchStep = searchAnalysisQueued || analysisRunning.search || hasSearchAnalysisResult
+    ? 4
+    : (stagedAnalysisReferences.length ? 3 : (searchLoading || hasSearchResult || searchCandidateReferences.length ? 2 : 1));
+  const candidateSelectionLocked = Boolean(
+    stagedAnalysisReferences.length ||
+    searchAnalysisQueued ||
+    analysisRunning.search ||
+    hasSearchAnalysisResult
   );
   const candidateMeta = useMemo(() => {
     return buildSearchCandidateMeta(candidatePayload, searchCandidateReferences.length);
@@ -696,10 +783,20 @@ export default function App() {
   }
 
   function handleSearchFormChange(field, value) {
+    if (searchInputLocked) {
+      setSearchStatus(t("search.lockedExistingFlow"));
+      setSearchStatusError(false);
+      return;
+    }
     setSearchForm((current) => ({ ...current, [field]: value }));
   }
 
   function handleToggleSource(value, checked) {
+    if (searchInputLocked) {
+      setSearchStatus(t("search.lockedExistingFlow"));
+      setSearchStatusError(false);
+      return;
+    }
     setSearchForm((current) => ({
       ...current,
       sources: normalizeEnabledPaperSources(checked
@@ -798,25 +895,22 @@ export default function App() {
     if (!candidateId) return;
     const isStandalone = scope === "standalone";
     const historyId = isStandalone ? standaloneActiveSearchHistoryId : activeSearchHistoryId;
-    const setVotes = isStandalone ? setStandaloneCandidateFeedbackVotes : setCandidateFeedbackVotes;
-    const setPending = isStandalone ? setStandaloneCandidateFeedbackPending : setCandidateFeedbackPending;
-    setVotes((current) => ({ ...current, [candidateId]: vote }));
-    setPending((current) => ({ ...current, [candidateId]: true }));
+    setCandidateFeedbackVotes((current) => syncReferenceFeedback(current, searchCandidateReferences, reference, vote));
+    setStandaloneCandidateFeedbackVotes((current) => syncReferenceFeedback(current, standaloneSearchCandidateReferences, reference, vote));
+    setCandidateFeedbackPending((current) => syncReferenceFeedback(current, searchCandidateReferences, reference, true));
+    setStandaloneCandidateFeedbackPending((current) => syncReferenceFeedback(current, standaloneSearchCandidateReferences, reference, true));
     try {
       await submitReferenceFeedback({
         historyId,
-        referenceKey: candidateId,
+        referenceKey: referenceStableKey(reference) || candidateId,
         vote,
         reference,
       });
     } catch (error) {
       console.warn("reference feedback was not recorded", error);
     } finally {
-      setPending((current) => {
-        const next = { ...current };
-        delete next[candidateId];
-        return next;
-      });
+      setCandidateFeedbackPending((current) => clearSyncedReferenceFeedback(current, searchCandidateReferences, reference));
+      setStandaloneCandidateFeedbackPending((current) => clearSyncedReferenceFeedback(current, standaloneSearchCandidateReferences, reference));
     }
   }
 
@@ -825,10 +919,16 @@ export default function App() {
       navigate("standaloneSearch");
       return;
     }
-    showSearchStep(step);
+    showSearchStep(step, { force: true });
   }
 
   async function submitLiteratureSearch(targetView = "search") {
+    if (searchInputLocked) {
+      setSearchStatus(t("search.lockedExistingFlow"));
+      setSearchStatusError(false);
+      showSearchStep(Math.min(searchStep || 1, maxReachableSearchStep), { force: true });
+      return;
+    }
     const query = searchForm.query.trim();
     if (!query) {
       setSearchStatus(t("status.enterSearchQuery"));
@@ -847,6 +947,8 @@ export default function App() {
     setSearchLoading(true);
     setSearchAnalysisQueued(false);
     setHasSearchResult(true);
+    setCandidateFeedbackVotes({});
+    setCandidateFeedbackPending({});
     setSearchStatus(t("status.searchingCandidates"));
     setSearchStatusError(false);
     showSearchTaskTarget(targetView, 2);
@@ -866,6 +968,8 @@ export default function App() {
         loadHistory(payload.history_id);
         setSearchCandidateReferences([]);
         setSelectedCandidateIds(new Set());
+        setCandidateFeedbackVotes({});
+        setCandidateFeedbackPending({});
         setCandidatePayload({ rejected_count: 0, errors: {} });
         setHasSearchResult(true);
         setSearchStatus(t(targetView === "standaloneSearch" ? "standaloneSearch.searchQueued" : "status.searchQueued"));
@@ -880,6 +984,8 @@ export default function App() {
       if (searchRunId.current !== runId) return;
       setSearchCandidateReferences([]);
       setSelectedCandidateIds(new Set());
+      setCandidateFeedbackVotes({});
+      setCandidateFeedbackPending({});
       setCandidatePayload({ rejected_count: 0, errors: { search: error.message } });
       setSearchStatus(t("status.searchFailed", { message: error.message }));
       setSearchStatusError(true);
@@ -910,6 +1016,8 @@ export default function App() {
     const runId = ++standaloneSearchRunId.current;
     setStandaloneSearchLoading(true);
     setStandaloneHasSearchResult(true);
+    setStandaloneCandidateFeedbackVotes({});
+    setStandaloneCandidateFeedbackPending({});
     setStandaloneSearchStatus(t("status.searchingCandidates"));
     setStandaloneSearchStatusError(false);
     navigate("standaloneSearch");
@@ -929,6 +1037,8 @@ export default function App() {
         loadHistory(payload.history_id);
         setStandaloneSearchCandidateReferences([]);
         setStandaloneSelectedCandidateIds(new Set());
+        setStandaloneCandidateFeedbackVotes({});
+        setStandaloneCandidateFeedbackPending({});
         setStandaloneCandidatePayload({ rejected_count: 0, errors: {} });
         setStandaloneHasSearchResult(true);
         setStandaloneSearchStatus(t("standaloneSearch.searchQueued"));
@@ -943,6 +1053,8 @@ export default function App() {
       if (standaloneSearchRunId.current !== runId) return;
       setStandaloneSearchCandidateReferences([]);
       setStandaloneSelectedCandidateIds(new Set());
+      setStandaloneCandidateFeedbackVotes({});
+      setStandaloneCandidateFeedbackPending({});
       setStandaloneCandidatePayload({ rejected_count: 0, errors: { search: error.message } });
       setStandaloneSearchStatus(t("status.searchFailed", { message: error.message }));
       setStandaloneSearchStatusError(true);
@@ -1034,7 +1146,7 @@ export default function App() {
     setSearchStatus(t("status.addedToStaged", { count: selected.length }));
     setSearchStatusError(false);
     setSearchAnalysisQueued(false);
-    showSearchStep(3);
+    showSearchStep(3, { force: true });
   }
 
   function startNewSearchFlow() {
@@ -1065,6 +1177,8 @@ export default function App() {
     }));
     setStandaloneSearchCandidateReferences([]);
     setStandaloneSelectedCandidateIds(new Set());
+    setStandaloneCandidateFeedbackVotes({});
+    setStandaloneCandidateFeedbackPending({});
     setStandaloneCandidatePayload({ rejected_count: 0, errors: {} });
     setStandaloneHasSearchResult(false);
     setStandaloneActiveSearchHistoryId("");
@@ -1100,6 +1214,8 @@ export default function App() {
     setSearchForm({ ...standaloneSearchForm });
     setSearchCandidateReferences(standaloneSearchCandidateReferences.map((reference) => ({ ...reference })));
     setSelectedCandidateIds(new Set(standaloneSelectedCandidateIds));
+    setCandidateFeedbackVotes((current) => mergeReferenceFeedbackForReferences(standaloneSearchCandidateReferences, standaloneCandidateFeedbackVotes, current));
+    setCandidateFeedbackPending((current) => mergeReferenceFeedbackForReferences(standaloneSearchCandidateReferences, standaloneCandidateFeedbackPending, current));
     setCandidatePayload({ ...standaloneCandidatePayload });
     setHasSearchResult(standaloneHasSearchResult);
     setActiveSearchHistoryId(standaloneActiveSearchHistoryId);
@@ -1124,6 +1240,8 @@ export default function App() {
     }));
     setSearchCandidateReferences([]);
     setSelectedCandidateIds(new Set());
+    setCandidateFeedbackVotes({});
+    setCandidateFeedbackPending({});
     setStagedAnalysisReferences([]);
     setCandidatePayload({ rejected_count: 0, errors: {} });
     setHasSearchResult(false);
@@ -1213,7 +1331,7 @@ export default function App() {
   }
 
   const topbarCurrentView = currentView === "results" ? activeAnalysisSource : currentView;
-  const showStartNewSearchFlow = searchStep > 1 && Boolean(
+  const showStartNewSearchFlow = Boolean(
     activeSearchHistoryId ||
     searchLoading ||
     hasSearchResult ||
@@ -1349,6 +1467,9 @@ export default function App() {
             showStartNewFlow={showStartNewSearchFlow}
             hasAnalysisResult={hasSearchAnalysisResult}
             hasSearchResult={hasSearchResult}
+            maxReachableStep={maxReachableSearchStep}
+            searchLocked={searchInputLocked}
+            candidateSelectionLocked={candidateSelectionLocked}
             onStepChange={showSearchStep}
             onSearchFormChange={handleSearchFormChange}
             onToggleSource={handleToggleSource}

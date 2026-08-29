@@ -36,6 +36,9 @@ export default function SearchFlowView({
   showStartNewFlow = false,
   hasAnalysisResult = false,
   hasSearchResult,
+  maxReachableStep = activeStep,
+  searchLocked = false,
+  candidateSelectionLocked = false,
   onStepChange,
   onSearchFormChange,
   onToggleSource,
@@ -77,11 +80,12 @@ export default function SearchFlowView({
   const perSourceLabel = isEnglish ? "each" : "\u6bcf\u6e90";
   const filterSummary = `${searchForm.year || anyYearLabel} / ${searchForm.limit || "-"} ${perSourceLabel}`;
   const hasQueryInput = Boolean(searchForm.query.trim());
-  const submitButtonState = searchLoading ? "is-loading" : (hasQueryInput ? "is-ready" : "is-empty");
+  const submitButtonState = searchLoading ? "is-loading" : (hasQueryInput && !searchLocked ? "is-ready" : "is-empty");
   const analysisActionLabel = analysisRunning
     ? t("search.viewAnalysisProgress")
     : (analysisQueued ? t("search.analysisSubmitted") : (hasAnalysisResult ? t("search.viewAnalysisResult") : t("search.nextAnalyze")));
   const handleStepChange = (step) => {
+    if (step > maxReachableStep) return;
     if (step === 4 && hasAnalysisResult) {
       onViewResults();
       return;
@@ -148,7 +152,7 @@ export default function SearchFlowView({
         </div>
       </div>
 
-      <Stepper activeStep={activeStep} onStepChange={handleStepChange} t={t} />
+      <Stepper activeStep={activeStep} maxStep={maxReachableStep} onStepChange={handleStepChange} t={t} />
 
       {activeStep === 1 ? (
         <section className="panel flow-step search-entry-panel is-active">
@@ -156,7 +160,7 @@ export default function SearchFlowView({
             <div className="search-composer">
               <label className="search-field search-field-wide search-query-field">
                 <span>{t("search.query")}</span>
-                <textarea ref={queryTextareaRef} rows="1" value={searchForm.query} placeholder="low-resource medical image segmentation foundation model" onChange={(event) => onSearchFormChange("query", event.target.value)} />
+                <textarea ref={queryTextareaRef} rows="1" value={searchForm.query} disabled={searchLocked} placeholder="low-resource medical image segmentation foundation model" onChange={(event) => onSearchFormChange("query", event.target.value)} />
               </label>
               <div className="search-composer-toolbar">
                 <div className="search-toolbar-left">
@@ -168,6 +172,7 @@ export default function SearchFlowView({
                       aria-expanded={settingsMenuOpen}
                       aria-label="Search settings"
                       title="Search settings"
+                      disabled={searchLocked}
                       onClick={toggleSettingsMenu}
                     >
                       <span className="standalone-options-plus" aria-hidden="true" />
@@ -205,7 +210,7 @@ export default function SearchFlowView({
                                   const readableLabel = sourceLabel(label);
                                   return (
                                     <label className="source-app-option" role="menuitemcheckbox" aria-checked={checked} key={value}>
-                                      <input type="checkbox" checked={checked} onChange={(event) => onToggleSource(value, event.target.checked)} />
+                                      <input type="checkbox" checked={checked} disabled={searchLocked} onChange={(event) => onToggleSource(value, event.target.checked)} />
                                       <span className={`source-app-mark source-app-mark--${value}`} aria-hidden="true">
                                         {readableLabel.slice(0, 1)}
                                       </span>
@@ -225,9 +230,10 @@ export default function SearchFlowView({
                                     <label className="source-app-option mode-app-option" role="menuitemradio" aria-checked={checked} key={value}>
                                       <input
                                         type="radio"
-                                        name="searchMode"
-                                        checked={checked}
-                                        onChange={() => onSearchFormChange("searchMode", value)}
+                                      name="searchMode"
+                                      checked={checked}
+                                      disabled={searchLocked}
+                                      onChange={() => onSearchFormChange("searchMode", value)}
                                       />
                                       <span className={`source-app-mark mode-app-mark mode-app-mark--${value}`} aria-hidden="true">
                                         {readableLabel.slice(0, 1) || index + 1}
@@ -243,11 +249,11 @@ export default function SearchFlowView({
                               <div className="standalone-options-section">
                                 <label className="search-mini-field filter-mini-field">
                                   <span>{t("search.year")}</span>
-                                  <input type="text" value={searchForm.year} placeholder="2022-2026" onChange={(event) => onSearchFormChange("year", event.target.value)} />
+                                  <input type="text" value={searchForm.year} disabled={searchLocked} placeholder="2022-2026" onChange={(event) => onSearchFormChange("year", event.target.value)} />
                                 </label>
                                 <label className="search-mini-field search-mini-field--limit filter-mini-field">
                                   <span>{t("search.limit")}</span>
-                                  <input type="number" min="1" max="50" value={searchForm.limit} onChange={(event) => onSearchFormChange("limit", event.target.value)} />
+                                  <input type="number" min="1" max="50" value={searchForm.limit} disabled={searchLocked} onChange={(event) => onSearchFormChange("limit", event.target.value)} />
                                 </label>
                               </div>
                             ) : null}
@@ -262,7 +268,7 @@ export default function SearchFlowView({
                 <button
                   className={`search-submit-button search-submit-button--icon ${submitButtonState}`}
                   type="button"
-                  disabled={searchLoading}
+                  disabled={searchLoading || searchLocked}
                   onClick={onSubmitSearch}
                   aria-label={searchLoading ? t("search.searching") : t("search.submit")}
                   title={searchLoading ? t("search.searching") : t("search.submit")}
@@ -273,8 +279,8 @@ export default function SearchFlowView({
               </div>
             </div>
             <div className="advanced-options">
-              <label><input type="checkbox" checked={searchForm.includeNeedsReview} onChange={(event) => onSearchFormChange("includeNeedsReview", event.target.checked)} /> {t("search.showReview")}</label>
-              <label><input type="checkbox" checked={searchForm.appendAnnotationRecord} onChange={(event) => onSearchFormChange("appendAnnotationRecord", event.target.checked)} /> {t("search.writeRecord")}</label>
+              <label><input type="checkbox" checked={searchForm.includeNeedsReview} disabled={searchLocked} onChange={(event) => onSearchFormChange("includeNeedsReview", event.target.checked)} /> {t("search.showReview")}</label>
+              <label><input type="checkbox" checked={searchForm.appendAnnotationRecord} disabled={searchLocked} onChange={(event) => onSearchFormChange("appendAnnotationRecord", event.target.checked)} /> {t("search.writeRecord")}</label>
             </div>
           </div>
         </section>
@@ -286,7 +292,7 @@ export default function SearchFlowView({
             {searchLoading ? (
               <LoadingState title={t("search.loadingTitle")} message={t("search.loadingMessage")} />
             ) : hasSearchResult ? (
-              <CandidateList candidates={candidates} selectedIds={selectedCandidateIds} meta="" onToggle={onToggleCandidate} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onCandidateFeedback} />
+              <CandidateList candidates={candidates} selectedIds={selectedCandidateIds} meta="" onToggle={onToggleCandidate} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onCandidateFeedback} selectionLocked={candidateSelectionLocked} />
             ) : (
               <div className="candidate-list">
                 <div className="candidate-empty">{t("search.emptyAfterSearch")}</div>
@@ -294,7 +300,7 @@ export default function SearchFlowView({
             )}
             <div className="form-actions">
               <button className="ghost-button" type="button" onClick={() => onStepChange(1)}>{t("search.backSearch")}</button>
-              <button className="primary-button" type="button" disabled={!selectedCandidateIds.size} onClick={onAddSelected}>{t("search.addToList")}</button>
+              <button className="primary-button" type="button" disabled={candidateSelectionLocked || !selectedCandidateIds.size} onClick={onAddSelected}>{t("search.addToList")}</button>
             </div>
           </div>
         </section>

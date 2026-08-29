@@ -1,10 +1,10 @@
 import ReferenceLink from "./ReferenceLink.jsx";
-import { referenceIdentifierText, toStringList } from "../lib/formatters.js";
+import { referenceIdentifierText, referenceStableKey, toStringList } from "../lib/formatters.js";
 
 const CANDIDATE_BYLINE_MAX_CHARS = 260;
 const CANDIDATE_ABSTRACT_MAX_CHARS = 900;
 
-export default function CandidateList({ candidates, selectedIds, meta, onToggle, t, feedbackVotes = {}, feedbackPending = {}, onFeedback }) {
+export default function CandidateList({ candidates, selectedIds, meta, onToggle, t, feedbackVotes = {}, feedbackPending = {}, onFeedback, selectionLocked = false }) {
   const qualified = candidates.filter((reference) => reference.candidate_group === "qualified");
   const needsReview = candidates.filter((reference) => reference.candidate_group === "needs_review");
   const rejected = candidates.filter((reference) => reference.candidate_group === "rejected");
@@ -24,15 +24,15 @@ export default function CandidateList({ candidates, selectedIds, meta, onToggle,
     <>
       {meta ? <p id="searchCandidateMeta" className="candidate-meta">{meta}</p> : null}
       <div className="candidate-list">
-        <CandidateGroup title={t("candidate.qualified")} references={qualified} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} />
-        <CandidateGroup title={t("candidate.needsReview")} references={needsReview} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} />
+        <CandidateGroup title={t("candidate.qualified")} references={qualified} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} selectionLocked={selectionLocked} />
+        <CandidateGroup title={t("candidate.needsReview")} references={needsReview} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} selectionLocked={selectionLocked} />
         <CandidateGroup title={t("candidate.rejectedReferences")} references={rejected} selectedIds={selectedIds} onToggle={onToggle} t={t} feedbackVotes={feedbackVotes} feedbackPending={feedbackPending} onFeedback={onFeedback} selectable={false} />
       </div>
     </>
   );
 }
 
-function CandidateGroup({ title, references, selectedIds, onToggle, t, feedbackVotes, feedbackPending, onFeedback, selectable = true }) {
+function CandidateGroup({ title, references, selectedIds, onToggle, t, feedbackVotes, feedbackPending, onFeedback, selectable = true, selectionLocked = false }) {
   if (!references.length) return null;
   return (
     <section className="candidate-group">
@@ -41,10 +41,11 @@ function CandidateGroup({ title, references, selectedIds, onToggle, t, feedbackV
         <CandidateItem
           reference={reference}
           checked={selectable && selectedIds.has(reference.candidate_id)}
+          selectionLocked={selectionLocked}
           onToggle={onToggle}
           t={t}
-          feedbackVote={feedbackVotes[reference.candidate_id] || ""}
-          feedbackPending={Boolean(feedbackPending[reference.candidate_id])}
+          feedbackVote={referenceFeedbackValue(feedbackVotes, reference)}
+          feedbackPending={Boolean(referenceFeedbackValue(feedbackPending, reference))}
           onFeedback={onFeedback}
           selectable={selectable}
           key={reference.candidate_id}
@@ -54,7 +55,7 @@ function CandidateGroup({ title, references, selectedIds, onToggle, t, feedbackV
   );
 }
 
-function CandidateItem({ reference, checked, onToggle, t, feedbackVote = "", feedbackPending = false, onFeedback, selectable = true }) {
+function CandidateItem({ reference, checked, selectionLocked = false, onToggle, t, feedbackVote = "", feedbackPending = false, onFeedback, selectable = true }) {
   const status = reference.candidate_group === "needs_review" ? "needs_review" : reference.screening_status || reference.candidate_group;
   const risks = visibleRiskItems(reference);
   const identifier = translatedIdentifier(referenceIdentifierText(reference), t);
@@ -71,8 +72,8 @@ function CandidateItem({ reference, checked, onToggle, t, feedbackVote = "", fee
         <input
           type="checkbox"
           checked={checked}
-          disabled={!selectable}
-          onChange={(event) => selectable && onToggle(reference.candidate_id, event.target.checked)}
+          disabled={!selectable || selectionLocked}
+          onChange={(event) => selectable && !selectionLocked && onToggle(reference.candidate_id, event.target.checked)}
         />
         <span>
           <span className={`candidate-badge verification-${reference.verification_status || "partial"}`}>{reference.verification_status || "partial"}</span>{" "}
@@ -121,6 +122,17 @@ function truncateDisplayText(value, maxChars) {
 
 function translatedIdentifier(identifier, t) {
   return identifier === "无稳定 ID" ? t("reference.noStableId") : identifier;
+}
+
+function referenceFeedbackValue(feedbackMap, reference) {
+  const keys = Array.from(new Set([
+    reference?.candidate_id,
+    referenceStableKey(reference || {}),
+  ].map((value) => String(value || "").trim()).filter(Boolean)));
+  for (const key of keys) {
+    if (feedbackMap[key]) return feedbackMap[key];
+  }
+  return "";
 }
 
 function visibleRiskItems(reference) {

@@ -10,23 +10,28 @@ const steps = [
   [4, "stepper.analyze", "stepper.analyzeSub", stepAnalyzeIcon],
 ];
 
-export default function Stepper({ activeStep, onStepChange, t }) {
+export default function Stepper({ activeStep, maxStep = activeStep, onStepChange, t }) {
   return (
     <nav className="stepper" aria-label={t("stepper.aria")}>
-      {steps.map(([step, titleKey, subtitleKey, iconSrc]) => (
-        <button
-          className={`step ${activeStep === step ? "is-active" : ""} ${activeStep > step ? "is-done" : ""}`}
-          type="button"
-          onClick={() => onStepChange(step)}
-          key={step}
-        >
-          <span className="step-number">
-            <img className="step-icon" src={iconSrc} alt="" aria-hidden="true" />
-            <span className="step-index">{step}</span>
-          </span>
-          <span><strong>{t(titleKey)}</strong><small>{t(subtitleKey)}</small></span>
-        </button>
-      ))}
+      {steps.map(([step, titleKey, subtitleKey, iconSrc]) => {
+        const isLocked = step > maxStep;
+        return (
+          <button
+            className={`step ${activeStep === step ? "is-active" : ""} ${activeStep > step ? "is-done" : ""} ${isLocked ? "is-locked" : ""}`}
+            type="button"
+            disabled={isLocked}
+            aria-disabled={isLocked}
+            onClick={() => onStepChange(step)}
+            key={step}
+          >
+            <span className="step-number">
+              <img className="step-icon" src={iconSrc} alt="" aria-hidden="true" />
+              <span className="step-index">{step}</span>
+            </span>
+            <span><strong>{t(titleKey)}</strong><small>{t(subtitleKey)}</small></span>
+          </button>
+        );
+      })}
     </nav>
   );
 }

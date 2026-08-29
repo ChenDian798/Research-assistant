@@ -2783,6 +2783,13 @@ select:focus {
   background: #34c7b0;
 }
 
+.step:disabled,
+.step.is-locked {
+  cursor: not-allowed;
+  opacity: 0.48;
+  box-shadow: none;
+}
+
 .search-field {
   display: grid;
   gap: 7px;

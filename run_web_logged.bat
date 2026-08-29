@@ -18,9 +18,31 @@ echo Research Agent Web will write stderr to:
 echo   "%ERR_LOG%"
 echo.
 
+set "PROJECT_PYTHON=%~dp0.venv\Scripts\python.exe"
 set "CODEX_PYTHON=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-if exist "%CODEX_PYTHON%" (
-  "%CODEX_PYTHON%" web_app.py %PORT% 1>>"%OUT_LOG%" 2>>"%ERR_LOG%"
+set "PYTHON_CMD="
+
+if exist "%PROJECT_PYTHON%" (
+  set "PYTHON_CMD=%PROJECT_PYTHON%"
+) else if exist "%CODEX_PYTHON%" (
+  set "PYTHON_CMD=%CODEX_PYTHON%"
 ) else (
-  python web_app.py %PORT% 1>>"%OUT_LOG%" 2>>"%ERR_LOG%"
+  set "PYTHON_CMD=python"
 )
+
+echo Using Python:
+echo   "%PYTHON_CMD%"
+echo.
+
+"%PYTHON_CMD%" -c "import dotenv" 1>nul 2>nul
+if errorlevel 1 (
+  echo Missing Python dependency: python-dotenv
+  echo Install dependencies with:
+  echo   "%PYTHON_CMD%" -m pip install -r requirements.txt
+  echo.
+  echo Missing Python dependency: python-dotenv>>"%ERR_LOG%"
+  echo Install dependencies with: "%PYTHON_CMD%" -m pip install -r requirements.txt>>"%ERR_LOG%"
+  exit /b 1
+)
+
+"%PYTHON_CMD%" web_app.py %PORT% 1>>"%OUT_LOG%" 2>>"%ERR_LOG%"

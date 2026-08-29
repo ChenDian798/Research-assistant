@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 set "PORT=%~1"
 if "%PORT%"=="" set "PORT=8000"
@@ -18,5 +19,18 @@ set "OUT_LOG=%LOG_DIR%\web_backend_%PORT%_%STAMP%.out.log"
 set "ERR_LOG=%LOG_DIR%\web_backend_%PORT%_%STAMP%.err.log"
 
 start "Research Agent Server %PORT%" cmd /k call "%~dp0run_web_logged.bat" %PORT% "%OUT_LOG%" "%ERR_LOG%"
-timeout /t 2 /nobreak >nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '%URL%'"
+for /l %%I in (1,1,20) do (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing '%URL%/health' -TimeoutSec 1 | Out-Null; exit 0 } catch { exit 1 }"
+  if !ERRORLEVEL! EQU 0 (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '%URL%'"
+    exit /b 0
+  )
+  timeout /t 1 /nobreak >nul
+)
+
+echo Failed to start Research Agent Web on %URL%.
+echo stderr log:
+echo   "%ERR_LOG%"
+echo.
+if exist "%ERR_LOG%" type "%ERR_LOG%"
+exit /b 1
