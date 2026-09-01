@@ -3876,26 +3876,68 @@ def text_from_node(node) -> str:
 
 
 def fetch_json_url(url: str, params: dict, *, headers: dict | None = None) -> dict:
+    host = urlparse(url).netloc
+    is_openalex = host.casefold() == "api.openalex.org"
+    request_params = dict(params)
+    if is_openalex:
+        api_key = str(os.getenv("OPENALEX_API_KEY") or "").strip()
+        if api_key:
+            request_params.setdefault("api_key", api_key)
     request_headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     if headers:
         request_headers.update(headers)
-    request = Request(
-        f"{url}?{urlencode(params)}",
-        headers=request_headers,
-    )
-    try:
-        with urlopen(request, timeout=20, context=https_context()) as response:
-            return json.loads(response.read().decode("utf-8", errors="replace"))
-    except HTTPError as error:
-        host = urlparse(url).netloc
-        if error.code == 429 and "semanticscholar" in host:
-            raise PaperSearchError(
-                "Semantic Scholar rate limit reached (HTTP 429). "
-                "Uncheck Semantic Scholar or set PAPER_SEARCH_MCP_SEMANTIC_SCHOLAR_API_KEY."
-            ) from error
-        raise PaperSearchError(f"{host} search failed: HTTP Error {error.code}") from error
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
-        raise PaperSearchError(f"{urlparse(url).netloc} search failed: {error}") from error
+    attempts = 1
+    if is_openalex:
+        try:
+            configured_attempts = int(os.getenv("PAPER_SEARCH_OPENALEX_RETRIES", "3") or 3)
+        except ValueError:
+            configured_attempts = 3
+        attempts = max(1, min(configured_attempts, 5))
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        request = Request(f"{url}?{urlencode(request_params)}", headers=request_headers)
+        try:
+            with urlopen(request, timeout=20, context=https_context()) as response:
+                return json.loads(response.read().decode("utf-8", errors="replace"))
+        except HTTPError as error:
+            last_error = error
+            transient_openalex_error = is_openalex and error.code in {429, 500, 502, 503, 504}
+            if transient_openalex_error and attempt + 1 < attempts:
+                time.sleep(openalex_retry_delay_seconds(error, attempt))
+                continue
+            if is_openalex and error.code == 429:
+                raise PaperSearchError(
+                    "OpenAlex 检索受到频率限制或当日额度已用尽（HTTP 429）。"
+                    "请稍后重试，或配置免费的 OPENALEX_API_KEY。"
+                ) from error
+            if error.code == 429 and "semanticscholar" in host:
+                raise PaperSearchError(
+                    "Semantic Scholar rate limit reached (HTTP 429). "
+                    "Uncheck Semantic Scholar or set PAPER_SEARCH_MCP_SEMANTIC_SCHOLAR_API_KEY."
+                ) from error
+            if is_openalex:
+                raise PaperSearchError(f"OpenAlex 检索失败：HTTP {error.code}") from error
+            raise PaperSearchError(f"{host} search failed: HTTP Error {error.code}") from error
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+            last_error = error
+            if is_openalex and attempt + 1 < attempts:
+                time.sleep(openalex_retry_delay_seconds(error, attempt))
+                continue
+            if is_openalex:
+                raise PaperSearchError(f"OpenAlex 检索失败：{error}") from error
+            raise PaperSearchError(f"{host} search failed: {error}") from error
+    raise PaperSearchError(f"OpenAlex 检索失败：{last_error}")
+
+
+def openalex_retry_delay_seconds(error: Exception, attempt: int) -> float:
+    if isinstance(error, HTTPError):
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if retry_after:
+            try:
+                return max(0.0, min(float(retry_after), 30.0))
+            except ValueError:
+                pass
+    return min(float(2**attempt), 10.0)
 
 
 def first_list_text(value) -> str:

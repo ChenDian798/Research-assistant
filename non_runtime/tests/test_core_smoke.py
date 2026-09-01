@@ -13,7 +13,7 @@ import pytest
 from src.research_agent.literature_workflow import LiteratureAnalysisWorkflow
 from src.research_agent.novelty_check import NoveltyCheckWorkflow
 from src.research_agent.novelty_planner import build_novelty_plan, sanitize_innovation_text
-from src.research_agent.novelty_search import run_novelty_search_plan
+from src.research_agent.novelty_search import build_diagnostics, run_novelty_search_plan
 from src.research_agent.citations import format_references
 import src.research_agent.doi as doi_metadata
 from src.research_agent.doi import extract_arxiv_id, extract_doi, extract_pmid
@@ -570,6 +570,52 @@ def test_arxiv_title_search_retries_rate_limit(monkeypatch) -> None:
     assert results[0]["arxiv_id"] == "1706.03762"
 
 
+def test_openalex_search_retries_rate_limit_and_uses_api_key(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"results": []}'
+
+    calls = []
+
+    def fake_urlopen(request, *, timeout, context):
+        del context
+        calls.append((request.full_url, timeout))
+        if len(calls) == 1:
+            raise HTTPError(request.full_url, 429, "Too Many Requests", {}, None)
+        return FakeResponse()
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "test-openalex-key")
+    monkeypatch.setenv("PAPER_SEARCH_OPENALEX_RETRIES", "2")
+    monkeypatch.setattr(paper_search, "urlopen", fake_urlopen)
+    monkeypatch.setattr(paper_search.time, "sleep", lambda seconds: None)
+
+    assert paper_search.search_openalex_api("domain generalization", 2) == []
+    assert len(calls) == 2
+    assert "api_key=test-openalex-key" in calls[0][0]
+
+
+def test_openalex_rate_limit_error_is_chinese(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    def fake_urlopen(request, *, timeout, context):
+        del timeout, context
+        raise HTTPError(request.full_url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setenv("PAPER_SEARCH_OPENALEX_RETRIES", "1")
+    monkeypatch.setattr(paper_search, "urlopen", fake_urlopen)
+
+    with pytest.raises(PaperSearchError, match="OpenAlex 检索受到频率限制"):
+        paper_search.search_openalex_api("domain generalization", 2)
+
+
 def test_exact_title_search_survives_llm_query_rewrite(monkeypatch) -> None:
     async def fake_llm_plan(query, requested_sources, *, search_mode="auto"):
         del query, requested_sources, search_mode
@@ -1045,6 +1091,38 @@ def test_novelty_profile_tracks_domain_and_innovation_types(monkeypatch) -> None
     assert {"computer_model", "computer_benchmark"}.issubset(focus_keys)
 
 
+def test_novelty_report_fallback_narrative_is_chinese_for_english_input(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    result = asyncio.run(
+        NoveltyCheckWorkflow().run(
+            innovation_text="A lightweight encoder for low-resource domain generalization.",
+            references=[
+                {
+                    "title": "Lightweight Encoders for Domain Generalization",
+                    "abstract": "A compact encoder is evaluated in low-resource domains.",
+                    "verification_status": "partial",
+                }
+            ],
+            search_payload={"search_mode": "computer"},
+        )
+    )
+
+    has_chinese = lambda value: any("\u4e00" <= char <= "\u9fff" for char in str(value))
+    comparison = result["comparisons"][0]
+    profile_rows = [
+        *result["innovation_profile"]["innovation_types"],
+        *result["innovation_profile"]["domain_focus"],
+    ]
+
+    assert has_chinese(result["overall"]["assessment"])
+    assert all(has_chinese(item) for item in result["next_steps"])
+    assert all(has_chinese(item) for item in comparison["difference_points"])
+    assert has_chinese(comparison["recommendation"])
+    assert all(has_chinese(item["assessment"]) for item in profile_rows)
+
+
 class CaptureNoveltyLLM:
     def __init__(self) -> None:
         self.calls: list[list[int]] = []
@@ -1474,7 +1552,36 @@ def test_novelty_diagnostics_reports_source_failures(monkeypatch) -> None:
     result = run_novelty_search_plan(plan, "semantic,openalex", max_results_per_source=5)
 
     assert result["diagnostics"]["source_summary"]["semantic"]["error"] == "HTTP 429"
-    assert any("Semantic Scholar failed" in warning for warning in result["diagnostics"]["warnings"])
+    assert any("Semantic Scholar 检索失败" in warning for warning in result["diagnostics"]["warnings"])
+    assert all(
+        any("\u4e00" <= char <= "\u9fff" for char in warning)
+        for warning in result["diagnostics"]["warnings"]
+    )
+
+
+def test_novelty_diagnostics_explains_pubmed_baseline_zero_as_coverage_notice() -> None:
+    diagnostics = build_diagnostics(
+        queries=[
+            {
+                "source": "pubmed",
+                "strictness": "narrow",
+                "returned": 0,
+                "query_id": "baseline_overlap_3",
+            }
+        ],
+        source_summary={"pubmed": {"returned": 4, "kept": 3, "filtered": 1, "error": ""}},
+        raw_count=4,
+        deduped_count=4,
+        strong_count=2,
+        weak_count=1,
+        noise_count=1,
+        assessment_count=3,
+    )
+
+    assert diagnostics["warnings"] == [
+        "覆盖提示（非错误）：PubMed 针对第 3 个已知基线的精确组合检索未命中文献；"
+        "系统仍会通过宽泛主题、方法和创新主张检索补充覆盖。"
+    ]
 
 
 def test_search_papers_uses_source_specific_queries(monkeypatch) -> None:

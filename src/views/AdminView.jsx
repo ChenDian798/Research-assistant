@@ -28,6 +28,7 @@ export default function AdminView({ currentUser, t }) {
   }, [users]);
 
   const overviewMetrics = metricsData || emptyMetrics(metricsDays);
+  const noveltyFeedbackMetrics = overviewMetrics.feedback?.novelty_similarity || { total: 0, yes: 0, no: 0, positive_rate: null };
   const historyKinds = useMemo(() => uniqueValues(historyEntries.map((entry) => entry.kind)), [historyEntries]);
   const historyStatuses = useMemo(() => uniqueValues(historyEntries.map((entry) => entry.status)), [historyEntries]);
 
@@ -230,6 +231,13 @@ export default function AdminView({ currentUser, t }) {
           <Metric label={t("admin.metricsErrorJobs")} value={overviewMetrics.jobs.error || 0} />
           <Metric label={t("admin.metricsRunningJobs")} value={overviewMetrics.jobs.running || 0} />
           <Metric label={t("admin.metricsFiles")} value={overviewMetrics.storage.file_count || 0} />
+          <Metric label={t("admin.metricsSimilarityFeedback")} value={noveltyFeedbackMetrics.total || 0} />
+          <Metric label={t("admin.metricsSimilarityYes")} value={noveltyFeedbackMetrics.yes || 0} />
+          <Metric label={t("admin.metricsSimilarityNo")} value={noveltyFeedbackMetrics.no || 0} />
+          <Metric
+            label={t("admin.metricsSimilarityRate")}
+            value={noveltyFeedbackMetrics.positive_rate == null ? "-" : `${Math.round(noveltyFeedbackMetrics.positive_rate * 100)}%`}
+          />
         </div>
         <div className="admin-metrics-columns">
           <div className="admin-table-scroll">
@@ -658,6 +666,10 @@ function emptyMetrics(days = 7) {
     jobs: { queued: 0, running: 0, done: 0, error: 0 },
     quality: { candidate_total: 0, qualified_total: 0, needs_review_total: 0, rejected_total: 0 },
     storage: { file_count: 0 },
+    feedback: {
+      reference_relevance: { total: 0, yes: 0, no: 0, positive_rate: null },
+      novelty_similarity: { total: 0, yes: 0, no: 0, positive_rate: null },
+    },
     users_usage: [],
     recent_errors: [],
   };

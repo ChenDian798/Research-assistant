@@ -235,13 +235,14 @@ export async function deleteHistoryEntry(historyId) {
   return data;
 }
 
-export async function submitReferenceFeedback({ historyId = "", referenceKey = "", vote = "", reference = {} } = {}) {
+export async function submitReferenceFeedback({ historyId = "", referenceKey = "", feedbackKind = "reference_relevance", vote = "", reference = {} } = {}) {
   const response = await apiFetch("/api/reference-feedback", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       history_id: historyId,
       reference_key: referenceKey,
+      feedback_kind: feedbackKind,
       vote,
       reference: {
         title: reference.title || "",

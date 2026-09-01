@@ -3713,6 +3713,60 @@ select:focus {
   background: #ffffff;
 }
 
+.novelty-similarity-feedback {
+  display: grid;
+  justify-self: end;
+  gap: 6px;
+  width: min(100%, 190px);
+  padding: 8px;
+  border: 1px solid #dbe5f3;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.novelty-similarity-feedback-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.novelty-similarity-feedback button {
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid #cad8eb;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #334155;
+  font: inherit;
+  cursor: pointer;
+}
+
+.novelty-similarity-feedback button:hover,
+.novelty-similarity-feedback button:focus-visible {
+  border-color: #8fb3f8;
+  color: #1f5fd6;
+}
+
+.novelty-similarity-feedback button.is-selected {
+  border-color: rgba(52, 199, 176, 0.72);
+  background: #dcfbf5;
+  color: #0f766e;
+}
+
+.novelty-similarity-feedback button:disabled {
+  cursor: progress;
+  opacity: 0.62;
+}
+
+.novelty-similarity-feedback small {
+  color: #b42318;
+  font-weight: 650;
+}
+
 .novelty-priority-card h4 {
   margin: 0;
   color: #111827;
@@ -3799,6 +3853,7 @@ select:focus {
 }
 
 .novelty-comparison {
+  position: relative;
   border: 1px solid rgba(32, 41, 66, 0.12);
   border-radius: 8px;
   background: #ffffff;
@@ -3851,8 +3906,15 @@ select:focus {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 8px 12px;
   align-items: start;
-  padding: 15px;
+  padding: 15px 220px 15px 15px;
   cursor: pointer;
+}
+
+.novelty-comparison > .novelty-similarity-feedback {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
 }
 
 .novelty-comparison-title {
@@ -6747,6 +6809,12 @@ select:focus {
 
   .novelty-comparison-summary {
     grid-template-columns: 1fr;
+    padding: 12px 15px 15px;
+  }
+
+  .novelty-comparison > .novelty-similarity-feedback {
+    position: static;
+    margin: 12px 12px 0 auto;
   }
 
   .novelty-comparison-summary .candidate-byline,

@@ -127,13 +127,13 @@ def build_candidate(paper: dict, query: dict, plan: dict) -> dict:
     baseline_hits = matched_terms(text, [str(item) for item in plan.get("baseline_concepts") or []])
     notes: list[str] = []
     if required_hits:
-        notes.append(f"matched core topic: {', '.join(required_hits[:4])}")
+        notes.append(f"匹配核心主题：{', '.join(required_hits[:4])}")
     if method_hits:
-        notes.append(f"matched method: {', '.join(method_hits[:4])}")
+        notes.append(f"匹配方法：{', '.join(method_hits[:4])}")
     if context_hits:
-        notes.append(f"matched context: {', '.join(context_hits[:4])}")
+        notes.append(f"匹配应用背景：{', '.join(context_hits[:4])}")
     if baseline_hits:
-        notes.append(f"matched baseline: {', '.join(baseline_hits[:4])}")
+        notes.append(f"匹配基线：{', '.join(baseline_hits[:4])}")
     if screened.get("screening_status") == "rejected":
         notes.extend(screened.get("screening_reasons") or [])
 
@@ -226,16 +226,27 @@ def build_diagnostics(
     for source, summary in source_summary.items():
         if summary.get("error"):
             if source == "semantic":
-                warnings.append("Semantic Scholar failed or was rate-limited; this run relies on the remaining sources.")
+                warnings.append("Semantic Scholar 检索失败或受到频率限制；本轮结果仅基于其余可用来源。")
             else:
-                warnings.append(f"{source} search failed or returned an error: {summary.get('error')}")
+                warnings.append(f"{source} 检索失败或返回错误：{summary.get('error')}")
     for item in queries:
         if item.get("source") == "pubmed" and item.get("strictness") == "narrow" and not item.get("returned"):
-            warnings.append(f"PubMed narrow query returned 0 for {item.get('query_id')}.")
+            query_id = str(item.get("query_id") or "").strip()
+            baseline_match = re.fullmatch(r"baseline_overlap_(\d+)", query_id)
+            if baseline_match:
+                warnings.append(
+                    f"覆盖提示（非错误）：PubMed 针对第 {baseline_match.group(1)} 个已知基线的精确组合检索未命中文献；"
+                    "系统仍会通过宽泛主题、方法和创新主张检索补充覆盖。"
+                )
+            else:
+                warnings.append(
+                    f"覆盖提示（非错误）：PubMed 精确检索未命中文献（查询编号：{query_id}）；"
+                    "系统仍会通过较宽松的检索层补充覆盖。"
+                )
     if raw_count and assessment_count == 0:
-        warnings.append("Search returned records, but all were filtered as weak metadata or source noise.")
+        warnings.append("检索已返回记录，但全部因元数据不足或来源噪声而被过滤。")
     if raw_count == 0:
-        warnings.append("No source returned candidate records; broaden the claim or verify source availability.")
+        warnings.append("所有检索来源均未返回候选记录；建议适当放宽创新表述，并检查检索来源是否可用。")
     return {
         "queries": queries,
         "source_summary": source_summary,

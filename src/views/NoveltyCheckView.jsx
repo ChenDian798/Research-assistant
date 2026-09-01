@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import LoadingState from "../components/LoadingState.jsx";
 import ReferenceLink from "../components/ReferenceLink.jsx";
+import { submitReferenceFeedback } from "../lib/api.js";
 
 const sourceOptions = [
   ["arxiv", "arXiv"],
@@ -53,6 +54,7 @@ export default function NoveltyCheckView({
   onToggleSource,
   onSubmit,
   onStartNewTask,
+  historyId,
   t,
 }) {
   const textareaRef = useRef(null);
@@ -262,13 +264,13 @@ export default function NoveltyCheckView({
           <LoadingState title={t("novelty.loadingTitle")} message={t("novelty.loadingBody")} />
         </section>
       ) : hasResult ? (
-        <NoveltyReport result={result} t={t} />
+        <NoveltyReport result={result} historyId={historyId} t={t} />
       ) : null}
     </section>
   );
 }
 
-export function NoveltyReport({ result, t }) {
+export function NoveltyReport({ result, historyId = "", t }) {
   const overall = result?.overall || {};
   const comparisons = Array.isArray(result?.comparisons) ? result.comparisons : [];
   const claims = Array.isArray(result?.innovation_claims) ? result.innovation_claims : [];
@@ -321,6 +323,7 @@ export function NoveltyReport({ result, t }) {
             {topComparisons.map((comparison, index) => (
               <NoveltyComparison
                 comparison={comparison}
+                historyId={historyId}
                 t={t}
                 defaultOpen={index < 3 && ["high_overlap", "partial_overlap"].includes(normalizedOverlapLevel(comparison.overlap_level))}
                 key={`${comparison.reference_index}-${comparison.title}`}
@@ -521,13 +524,14 @@ function countsValue(counts) {
   return Number(counts.total || 0);
 }
 
-function NoveltyComparison({ comparison, t, defaultOpen = false }) {
+function NoveltyComparison({ comparison, historyId = "", t, defaultOpen = false }) {
   const points = Array.isArray(comparison.overlap_points) ? comparison.overlap_points : [];
   const differences = Array.isArray(comparison.difference_points) ? comparison.difference_points : [];
   const dimensions = comparison.dimension_overlap || {};
   const overlapLevel = normalizedOverlapLevel(comparison.overlap_level);
   return (
     <article className={`novelty-comparison novelty-comparison--${overlapLevel}`}>
+      <SimilarityFeedback historyId={historyId} reference={comparison} t={t} />
       <details open={defaultOpen}>
         <summary className="novelty-comparison-summary">
           <span className={`novelty-overlap novelty-overlap--${overlapLevel}`}>
@@ -630,6 +634,54 @@ function PriorityPriorWork({ rows, comparisons, t }) {
           </article>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SimilarityFeedback({ historyId, reference, t }) {
+  const [vote, setVote] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const referenceKey = [
+    reference.reference_index,
+    reference.doi,
+    reference.pmid,
+    reference.arxiv_id,
+    reference.source,
+    reference.title,
+  ].map((value) => String(value || "").trim()).filter(Boolean).join(":");
+
+  async function submitVote(nextVote) {
+    if (pending || !referenceKey) return;
+    const previousVote = vote;
+    setVote(nextVote);
+    setPending(true);
+    setError("");
+    try {
+      await submitReferenceFeedback({
+        historyId,
+        referenceKey,
+        feedbackKind: "novelty_similarity",
+        vote: nextVote,
+        reference,
+      });
+    } catch (submitError) {
+      setVote(previousVote);
+      setError(t("novelty.similarityFeedbackFailed"));
+      console.warn("novelty similarity feedback was not recorded", submitError);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="novelty-similarity-feedback" aria-label={t("novelty.similarityFeedbackLabel")}>
+      <span>{t("novelty.similarityFeedbackPrompt")}</span>
+      <div className="novelty-similarity-feedback-actions">
+        <button className={vote === "yes" ? "is-selected" : ""} type="button" disabled={pending} onClick={() => submitVote("yes")}>{t("novelty.similarityFeedbackYes")}</button>
+        <button className={vote === "no" ? "is-selected" : ""} type="button" disabled={pending} onClick={() => submitVote("no")}>{t("novelty.similarityFeedbackNo")}</button>
+      </div>
+      {error ? <small role="alert">{error}</small> : null}
     </div>
   );
 }

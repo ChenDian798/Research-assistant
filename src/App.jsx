@@ -1446,6 +1446,7 @@ export default function App() {
             onToggleSource={handleNoveltyToggleSource}
             onSubmit={submitNoveltyCheck}
             onStartNewTask={startNewNoveltyTask}
+            historyId={noveltyActiveHistoryId}
             t={t}
           />
         ) : null}

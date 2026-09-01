@@ -338,6 +338,26 @@ def test_admin_light_metrics_aggregates_by_user_and_rejects_non_admin(isolated_s
     running_job, _created = isolated_store.create_job(user["id"], "literature_analysis", {})
     isolated_store.save_job(user["id"], running_job["id"], {"status": "running"})
     isolated_store.store_file(user["id"], "uploads", "paper.pdf", b"%PDF-1.7\n", 30)
+    isolated_store.record_reference_feedback(
+        user["id"],
+        {
+            "history_id": "metrics-history-recent",
+            "reference_key": "paper-1",
+            "feedback_kind": "novelty_similarity",
+            "vote": "yes",
+            "reference": {"title": "Paper 1"},
+        },
+    )
+    isolated_store.record_reference_feedback(
+        user["id"],
+        {
+            "history_id": "metrics-history-recent",
+            "reference_key": "paper-1",
+            "feedback_kind": "novelty_similarity",
+            "vote": "no",
+            "reference": {"title": "Paper 1"},
+        },
+    )
 
     handler, sent = _handler("/api/admin/metrics?days=7", f"research_session={user_token}")
     handler.do_GET()
@@ -358,6 +378,7 @@ def test_admin_light_metrics_aggregates_by_user_and_rejects_non_admin(isolated_s
     assert payload["jobs"]["error"] == 1
     assert payload["jobs"]["running"] == 1
     assert payload["storage"]["file_count"] == 1
+    assert payload["feedback"]["novelty_similarity"] == {"total": 2, "yes": 1, "no": 1, "positive_rate": 0.5}
     assert payload["quality"]["candidate_total"] == 18
     assert payload["quality"]["qualified_total"] == 4
     assert payload["quality"]["needs_review_total"] == 1
@@ -394,8 +415,33 @@ def test_admin_light_metrics_empty_data_returns_zeroes(isolated_store):
     assert sent["payload"]["usage"]["history_total"] == 0
     assert sent["payload"]["jobs"]["done"] == 0
     assert sent["payload"]["storage"]["file_count"] == 0
+    assert sent["payload"]["feedback"]["novelty_similarity"] == {"total": 0, "yes": 0, "no": 0, "positive_rate": None}
     assert sent["payload"]["users_usage"] == []
     assert sent["payload"]["recent_errors"] == []
+
+
+def test_reference_feedback_keeps_latest_vote_and_appends_each_click(isolated_store):
+    user = isolated_store.create_local_user("feedback@example.test", "password-123", "Feedback User")
+    payload = {
+        "history_id": "novelty-history",
+        "reference_key": "doi:10.1000/example",
+        "feedback_kind": "novelty_similarity",
+        "vote": "yes",
+        "reference": {"title": "Example Paper", "doi": "10.1000/example"},
+    }
+
+    first = isolated_store.record_reference_feedback(user["id"], payload)
+    second = isolated_store.record_reference_feedback(user["id"], {**payload, "vote": "no"})
+
+    assert first["id"] == second["id"]
+    assert first["event_id"] != second["event_id"]
+    latest = isolated_store._fetchone("SELECT vote, reference_key FROM reference_feedback WHERE id=?", (second["id"],))
+    assert latest == {"vote": "no", "reference_key": "novelty_similarity:doi:10.1000/example"}
+    event_count = isolated_store._fetchone(
+        "SELECT COUNT(*) AS count FROM feedback_events WHERE owner_user_id=? AND feedback_kind=?",
+        (user["id"], "novelty_similarity"),
+    )
+    assert event_count["count"] == 2
 
 
 def test_admin_created_user_can_login(isolated_store):

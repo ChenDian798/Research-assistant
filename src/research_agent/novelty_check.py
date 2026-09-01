@@ -61,7 +61,9 @@ Rules:
 - No clear overlap means the candidate metadata does not show meaningful overlap.
 - Do not say the idea is proven novel, completely original, or has no overlap anywhere.
 - Be conservative when only title/abstract metadata is available. Do not claim novelty is proven.
-- Use Chinese for narrative fields when the user writes mainly Chinese; otherwise use English.
+- Always write every user-facing narrative field in Simplified Chinese, regardless of the language of the user's input.
+- Keep proper nouns, author names, paper titles, model/dataset names, acronyms, and established technical terms in their original language when that is clearer; explain the surrounding sentence in Chinese.
+- Keep schema keys and enum values exactly as specified in English.
 - Keep every list compact.
 """.strip()
 
@@ -229,8 +231,8 @@ class NoveltyCheckWorkflow:
                     "reference_index": reference["reference_index"],
                     "overlap_level": level,
                     "overlap_score": round(score, 3),
-                    "overlap_points": hits[:6] or ["No strong shared terms were found in available metadata."],
-                    "difference_points": ["Only title/abstract metadata was checked; verify the full text before making a final claim."],
+                    "overlap_points": hits[:6] or ["在现有题名、摘要和元数据中未发现明显的共同概念。"],
+                    "difference_points": ["目前只检查了题名、摘要和元数据；形成最终结论前仍需核验全文。"],
                     "dimension_overlap": dimension_overlap_from_hits(innovation_text, reference, hits),
                     "evidence": evidence_excerpt(reference, hits),
                     "recommendation": recommendation_for_level(level),
@@ -246,8 +248,8 @@ class NoveltyCheckWorkflow:
             },
             "comparisons": comparisons,
             "next_steps": [
-                "Review the highest-overlap papers manually, especially full-text method and experiment sections.",
-                "Tighten the innovation statement around the method, scenario, dataset, baseline, and claimed improvement.",
+                "人工复核重合度最高的文献，重点查看全文的方法与实验部分。",
+                "围绕方法、应用场景、数据集、基线和所声称的改进进一步收紧创新表述。",
             ],
         }
 
@@ -428,18 +430,10 @@ def exception_type_names(exceptions: list[Exception]) -> list[str]:
 
 
 def llm_degradation_warning(innovation_text: str, *, status: str) -> str:
-    is_zh = bool(re.search(r"[\u4e00-\u9fff]", str(innovation_text or "")))
+    del innovation_text
     if status == "fallback":
-        return (
-            "LLM 重合度评估超时或失败，本次结果已降级为本地规则/词面重合评估；请将结论视为初筛结果，并优先人工核验高重合候选。"
-            if is_zh
-            else "The LLM overlap assessment timed out or failed, so this result falls back to local lexical/rule-based assessment. Treat it as a preliminary screen and manually verify high-overlap candidates."
-        )
-    return (
-        "部分 LLM 批次超时或失败，本次结果混合了模型判断与本地规则兜底；请重点人工核验高重合和部分重合候选。"
-        if is_zh
-        else "Some LLM overlap-assessment batches timed out or failed, so this result mixes model judgments with local rule-based fallback. Manually verify high- and partial-overlap candidates."
-    )
+        return "LLM 重合度评估超时或失败，本次结果已降级为本地规则/词面重合评估；请将结论视为初筛结果，并优先人工核验高重合候选。"
+    return "部分 LLM 批次超时或失败，本次结果混合了模型判断与本地规则兜底；请重点人工核验高重合和部分重合候选。"
 
 
 def prefix_assessment_warning(assessment: str, warning: str) -> str:
@@ -523,8 +517,8 @@ def normalize_novelty_result(
         },
         "comparisons": normalized_comparisons,
         "next_steps": clean_string_list(data.get("next_steps"), limit=8) or [
-            "Review high-overlap and partial-overlap papers manually.",
-            "Refine the innovation statement to emphasize verifiable differences.",
+            "人工复核高重合和部分重合文献。",
+            "进一步完善创新表述，突出能够核验的实质差异。",
         ],
         "counts": novelty_counts(normalized_comparisons),
         "innovation_profile": normalize_innovation_profile(data.get("innovation_profile"), innovation_text, search_payload or {}),
@@ -829,15 +823,16 @@ def profile_risk_from_value(value: str, *, saw_known: bool, has_comparisons: boo
 
 
 def profile_assessment(label: str, risk: str, supporting: list[int]) -> str:
+    del label
     if risk == "high":
-        return "This innovation angle appears strongly represented in the current candidate set; verify full texts before claiming it as the core novelty."
+        return "当前候选文献中已较明显地出现这一创新方向；将其作为核心创新点之前，需要核验相关全文。"
     if risk == "moderate":
-        return "This innovation angle has partial overlap in the current candidate set; sharpen the exact difference and supporting evidence."
+        return "当前候选文献与这一创新方向存在部分重合；需要进一步明确具体差异及其支撑证据。"
     if risk == "low":
-        return "No strong overlap for this innovation angle is visible in the screened metadata, but this is not proof of novelty."
+        return "已筛选的元数据中暂未发现这一创新方向的明显重合，但这不能作为新颖性的证明。"
     if supporting:
-        return "Related candidates exist, but the available metadata is not enough to judge this innovation angle confidently."
-    return "Evidence is insufficient for this innovation angle in the current search results."
+        return "当前存在相关候选文献，但现有元数据不足以可靠判断这一创新方向。"
+    return "当前检索结果不足以判断这一创新方向。"
 
 
 def normalized_verification_status(value) -> str:
@@ -848,9 +843,9 @@ def normalized_verification_status(value) -> str:
 def verification_note(reference: dict) -> str:
     status = normalized_verification_status(reference.get("verification_status"))
     if status == "verified":
-        return "Stable identifier metadata was verified where available."
+        return "已在可用范围内核验稳定标识及其元数据。"
     if status == "needs_review":
-        return "metadata 存在冲突，需要人工确认。"
+        return "元数据存在冲突，需要人工确认。"
     if status == "unverified":
         return "该条文献未通过稳定标识校验，仅作为线索。"
     return "该条文献仅有部分身份线索，只能作为辅助线索。"
@@ -1256,22 +1251,22 @@ def safe_assessment(value: str) -> str:
 
 def recommendation_for_level(level: str) -> str:
     return {
-        "high_overlap": "Treat this as a priority manual check; compare full-text method, experiments, and claimed contribution.",
-        "partial_overlap": "Clarify what is different from this work and verify whether the difference is substantive.",
-        "adjacent": "Use this as related work context and check whether it cites closer papers.",
-        "no_clear_overlap": "No clear overlap appears in metadata, but full-text and database coverage still matter.",
-    }.get(level, "Verify manually before making a final novelty claim.")
+        "high_overlap": "将其列为优先人工复核对象，对照全文的方法、实验和贡献声明。",
+        "partial_overlap": "明确本研究与该文献的具体差异，并核验这种差异是否具有实质性。",
+        "adjacent": "将其作为相关工作背景，并检查其参考文献中是否存在更接近的研究。",
+        "no_clear_overlap": "元数据中暂未发现明确重合，但仍需考虑全文内容和数据库覆盖范围。",
+    }.get(level, "形成最终查新结论前请进行人工核验。")
 
 
 def assessment_for_risk(risk: str, count: int) -> str:
     if count <= 0:
-        return "No candidate literature was available, so novelty cannot be assessed from the current search."
+        return "当前没有可用的候选文献，因此无法根据本轮检索评估新颖性。"
     return {
-        "high": "The current search found literature with strong apparent overlap. The innovation claim needs careful narrowing or full-text verification.",
-        "moderate": "The current search found partial or adjacent overlap. The idea may still be defensible, but the claimed novelty should be sharpened.",
-        "low": "The current search did not show obvious overlap in available metadata. This is not proof of novelty; expand sources and verify full texts.",
-        "unknown": "The current evidence is insufficient for a confident novelty-risk judgment.",
-    }.get(risk, "The current evidence is insufficient for a confident novelty-risk judgment.")
+        "high": "本轮检索发现了表面上高度重合的文献，需要谨慎收紧创新主张或进一步核验全文。",
+        "moderate": "本轮检索发现了部分重合或邻近研究；该创新思路仍可能成立，但需要进一步明确所主张的新颖性。",
+        "low": "现有元数据中暂未发现明显重合，但这不能证明新颖性；建议扩展检索来源并核验全文。",
+        "unknown": "当前证据不足以对新颖性风险作出可靠判断。",
+    }.get(risk, "当前证据不足以对新颖性风险作出可靠判断。")
 
 
 def overall_risk_level(comparisons: list[dict]) -> str:

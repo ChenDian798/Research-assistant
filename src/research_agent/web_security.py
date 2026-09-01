@@ -214,6 +214,9 @@ class UserDataStore:
                 f"CREATE TABLE IF NOT EXISTS reference_feedback (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, history_id {identity}, reference_key {identity} NOT NULL, vote {identity} NOT NULL, title {identity}, source_label {identity}, doi {identity}, pmid {identity}, arxiv_id {identity}, created_at {identity} NOT NULL, updated_at {identity} NOT NULL)",
                 f"CREATE UNIQUE INDEX IF NOT EXISTS reference_feedback_owner_history_ref ON reference_feedback(owner_user_id, history_id, reference_key)",
                 f"CREATE INDEX IF NOT EXISTS reference_feedback_owner_updated ON reference_feedback(owner_user_id, updated_at DESC)",
+                f"CREATE TABLE IF NOT EXISTS feedback_events (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, history_id {identity}, reference_key {identity} NOT NULL, feedback_kind {identity} NOT NULL, vote {identity} NOT NULL, title {identity}, source_label {identity}, doi {identity}, pmid {identity}, arxiv_id {identity}, created_at {identity} NOT NULL)",
+                f"CREATE INDEX IF NOT EXISTS feedback_events_kind_created ON feedback_events(feedback_kind, created_at DESC)",
+                f"CREATE INDEX IF NOT EXISTS feedback_events_owner_history ON feedback_events(owner_user_id, history_id, created_at DESC)",
                 f"CREATE TABLE IF NOT EXISTS job_events (id {identity} PRIMARY KEY, job_id {identity} NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, status {identity}, stage {identity}, progress INTEGER, detail {json_type}, created_at {identity} NOT NULL)",
                 f"CREATE INDEX IF NOT EXISTS job_events_job_created ON job_events(job_id, created_at)",
                 f"CREATE TABLE IF NOT EXISTS documents (id {identity} PRIMARY KEY, owner_user_id {identity} NOT NULL REFERENCES users(id) ON DELETE CASCADE, original_name {identity} NOT NULL, content_type {identity}, sha256 {identity} NOT NULL, object_key {identity} NOT NULL, scan_status {identity} NOT NULL, created_at {identity} NOT NULL, expires_at {identity})",
@@ -618,7 +621,7 @@ class UserDataStore:
         now = utc_now()
         history_id = str(payload.get("history_id") or "").strip()
         reference = payload.get("reference") if isinstance(payload.get("reference"), dict) else {}
-        reference_key = str(
+        raw_reference_key = str(
             payload.get("reference_key")
             or reference.get("candidate_id")
             or reference.get("dedupe_key")
@@ -629,16 +632,24 @@ class UserDataStore:
             or reference.get("title")
             or ""
         ).strip()
+        feedback_kind = str(payload.get("feedback_kind") or "reference_relevance").strip().lower()
         vote = str(payload.get("vote") or "").strip().lower()
+        if feedback_kind not in {"reference_relevance", "novelty_similarity"}:
+            raise ValueError("Unsupported feedback kind.")
         if vote not in {"yes", "no"}:
             raise ValueError("Feedback vote must be yes or no.")
-        if not reference_key:
+        if not raw_reference_key:
             raise ValueError("Feedback reference key is required.")
+        raw_reference_key = raw_reference_key[:500]
+        reference_key = raw_reference_key if feedback_kind == "reference_relevance" else f"{feedback_kind}:{raw_reference_key}"[:500]
+        event_id = uuid.uuid4().hex
         item = {
             "id": uuid.uuid4().hex,
             "owner_user_id": owner,
             "history_id": history_id,
             "reference_key": reference_key[:500],
+            "feedback_kind": feedback_kind,
+            "event_id": event_id,
             "vote": vote,
             "title": str(reference.get("title") or "")[:500],
             "source_label": str(reference.get("source_label") or reference.get("retrieved_from") or "")[:160],
@@ -668,6 +679,11 @@ class UserDataStore:
                     "INSERT INTO reference_feedback (id, owner_user_id, history_id, reference_key, vote, title, source_label, doi, pmid, arxiv_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (item["id"], owner, item["history_id"], item["reference_key"], item["vote"], item["title"], item["source_label"], item["doi"], item["pmid"], item["arxiv_id"], item["created_at"], item["updated_at"]),
                 )
+            self._execute(
+                connection,
+                "INSERT INTO feedback_events (id, owner_user_id, history_id, reference_key, feedback_kind, vote, title, source_label, doi, pmid, arxiv_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (event_id, owner, history_id, raw_reference_key, feedback_kind, vote, item["title"], item["source_label"], item["doi"], item["pmid"], item["arxiv_id"], now),
+            )
             connection.commit()
         return item
 
@@ -873,6 +889,10 @@ class UserDataStore:
                 "rejected_total": 0,
             },
             "storage": {"file_count": 0},
+            "feedback": {
+                "reference_relevance": {"total": 0, "yes": 0, "no": 0, "positive_rate": None},
+                "novelty_similarity": {"total": 0, "yes": 0, "no": 0, "positive_rate": None},
+            },
             "users_usage": [],
             "recent_errors": [],
         }
@@ -918,6 +938,11 @@ class UserDataStore:
                 JOIN users u ON u.id = f.owner_user_id
                 WHERE u.deleted_at IS NULL AND f.created_at >= ?
                 """,
+                (cutoff,),
+            ).fetchall()
+            feedback_rows = self._execute(
+                connection,
+                "SELECT feedback_kind, vote, COUNT(*) AS count FROM feedback_events WHERE created_at >= ? GROUP BY feedback_kind, vote",
                 (cutoff,),
             ).fetchall()
 
@@ -996,6 +1021,17 @@ class UserDataStore:
             usage = user_usage(owner_user_id, email, display_name)
             usage["file_count"] += 1
             usage["last_activity_at"] = max(str(usage.get("last_activity_at") or ""), created_at)
+
+        for row in feedback_rows:
+            feedback_kind, vote, count = str(row[0] or ""), str(row[1] or ""), int(row[2] or 0)
+            summary = metrics["feedback"].get(feedback_kind)
+            if not summary or vote not in {"yes", "no"}:
+                continue
+            summary[vote] += count
+            summary["total"] += count
+        for summary in metrics["feedback"].values():
+            if summary["total"]:
+                summary["positive_rate"] = round(summary["yes"] / summary["total"], 4)
 
         metrics["users_usage"] = sorted(
             users_usage.values(),
@@ -1359,6 +1395,7 @@ class UserDataStore:
             self._execute(connection, "DELETE FROM history_entries WHERE updated_at < ?", (cutoff,))
             self._execute(connection, "DELETE FROM jobs WHERE updated_at < ?", (cutoff,))
             self._execute(connection, "DELETE FROM reference_feedback WHERE updated_at < ?", (cutoff,))
+            self._execute(connection, "DELETE FROM feedback_events WHERE created_at < ?", (cutoff,))
             files = self._execute(connection, "SELECT storage_path FROM files WHERE expires_at < ?", (utc_now(),)).fetchall()
             self._execute(connection, "DELETE FROM files WHERE expires_at < ?", (utc_now(),))
             self._execute(connection, "DELETE FROM documents WHERE expires_at < ?", (utc_now(),))

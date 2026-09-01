@@ -1058,7 +1058,13 @@ class ResearchWebHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
-        self._send_json({"ok": True, "feedback_id": feedback["id"], "vote": feedback["vote"]})
+        self._send_json({
+            "ok": True,
+            "feedback_id": feedback["id"],
+            "event_id": feedback["event_id"],
+            "feedback_kind": feedback["feedback_kind"],
+            "vote": feedback["vote"],
+        })
 
     def _server_port(self) -> int | str:
         server = getattr(self, "server", None)
