@@ -1295,7 +1295,7 @@ def test_novelty_llm_partial_batch_failure_warns_user(monkeypatch) -> None:
     assert result["status"] == "done"
     assert result["llm_assessment"]["status"] == "partial"
     assert result["llm_assessment"]["warnings"]
-    assert "mixes model judgments" in result["overall"]["assessment"]
+    assert "混合了模型判断与本地规则兜底" in result["overall"]["assessment"]
 
 
 class TimeoutNoveltyLLM:
@@ -1331,8 +1331,8 @@ def test_novelty_llm_timeout_falls_back_to_rules(monkeypatch) -> None:
     assert result["llm_assessment"]["succeeded_batch_count"] == 0
     assert result["llm_assessment"]["failed_batch_count"] == 2
     assert result["llm_assessment"]["warnings"]
-    assert "falls back" in result["overall"]["assessment"]
-    assert any("falls back" in step for step in result["next_steps"])
+    assert "已降级为本地规则/词面重合评估" in result["overall"]["assessment"]
+    assert any("已降级为本地规则/词面重合评估" in step for step in result["next_steps"])
 
 
 def test_novelty_planner_generates_layered_queries(monkeypatch) -> None:
